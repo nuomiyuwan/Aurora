@@ -1,0 +1,249 @@
+.auroraApp.view-model-viewer {
+  --stage-background-image: url('/aurora/frame-ring-background.png');
+  perspective: none;
+}
+
+.view-model-viewer .topTools { display: none; }
+
+.view-model-viewer .stageBackground {
+  filter: brightness(0.64) saturate(0.78);
+  opacity: 0.92;
+  transform: translate3d(var(--camera-bg-x), var(--camera-bg-y), 0) scale(1.15);
+}
+
+.modelViewerPage {
+  position: absolute;
+  z-index: 8;
+  inset: 0;
+  overflow: hidden;
+  color: rgba(232, 239, 251, 0.86);
+}
+
+.modelViewerPage[data-page-active='false'] {
+  pointer-events: none;
+}
+
+/*
+ * Do not turn the whole page into an opacity Backdrop Root while hidden. The
+ * renderer stays mounted and paused, while the screen-space glass surfaces
+ * remain composited at the same tiny warm alpha used by the frame-ring bar.
+ */
+.modelViewerPage[data-page-active='false'] > :is(
+  .frameRingBreadcrumb,
+  .modelViewerViewport,
+  .modelViewerViewHelperHitZone,
+  .modelViewerLoadState
+) {
+  opacity: 0;
+}
+
+.modelViewerEnvironmentControl[data-page-active='false'] {
+  opacity: 0.001;
+  pointer-events: none;
+}
+
+.modelViewerViewport {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  cursor: grab;
+  touch-action: none;
+}
+
+.modelViewerViewport:active { cursor: grabbing; }
+
+.modelViewerCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: 0;
+}
+
+.modelViewerEnvironmentControl {
+  position: absolute;
+  z-index: 16;
+  top: calc(var(--frame-ring-breadcrumb-top) + 40px * var(--frame-ring-layout-scale));
+  left: calc(112px * var(--frame-ring-layout-scale));
+  display: flex;
+  height: calc(32px * var(--frame-ring-layout-scale));
+  box-sizing: border-box;
+  align-items: center;
+  gap: calc(7px * var(--frame-ring-layout-scale));
+  border: calc(1px * var(--frame-ring-layout-scale)) solid transparent;
+  border-radius: calc(16px * var(--frame-ring-layout-scale));
+  color: rgba(202, 213, 231, 0.62);
+  cursor: pointer;
+  font: inherit;
+  font-size: calc(10px * var(--frame-ring-layout-scale));
+  letter-spacing: 0.04em;
+  padding: 0 calc(12px * var(--frame-ring-layout-scale));
+}
+
+.modelViewerEnvironmentControl strong {
+  color: rgba(226, 234, 248, 0.86);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.modelViewerEnvironmentControl i {
+  width: calc(5px * var(--frame-ring-layout-scale));
+  height: calc(5px * var(--frame-ring-layout-scale));
+  border-radius: 50%;
+  background: rgba(239, 151, 160, 0.78);
+}
+
+.modelViewerEnvironmentControl:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.modelViewerViewHelperHitZone {
+  position: absolute;
+  z-index: 16;
+  top: calc(var(--frame-ring-breadcrumb-top) + 26px * var(--frame-ring-layout-scale));
+  right: calc(32px * var(--frame-ring-layout-scale));
+  width: 128px;
+  height: 128px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.modelViewerViewHelperHitZone::before {
+  position: absolute;
+  inset: 7px;
+  border: 1px solid rgba(172, 201, 242, 0.105);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 48% 43%, rgba(132, 168, 221, 0.035), transparent 58%),
+    radial-gradient(circle at 50% 50%, transparent 63%, rgba(139, 174, 226, 0.025) 100%);
+  box-shadow:
+    inset 0 0 18px rgba(119, 157, 218, 0.025),
+    0 0 20px rgba(92, 136, 208, 0.025);
+  content: '';
+  opacity: 0.72;
+  pointer-events: none;
+  transition: border-color 220ms ease, box-shadow 220ms ease, opacity 220ms ease;
+}
+
+.modelViewerViewHelperHitZone:hover::before {
+  border-color: rgba(177, 207, 249, 0.2);
+  box-shadow:
+    inset 0 0 20px rgba(119, 157, 218, 0.045),
+    0 0 24px rgba(92, 136, 208, 0.06);
+  opacity: 1;
+}
+
+.modelViewerViewHelperHitZone[aria-disabled='true'] {
+  pointer-events: none;
+}
+
+.modelViewerLoadState {
+  position: absolute;
+  z-index: 15;
+  bottom: calc(var(--layout-plane-bottom-inset) + 112px * var(--layout-scale));
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: calc(8px * var(--layout-scale));
+  color: rgba(199, 211, 230, 0.48);
+  font-size: calc(11px * var(--layout-scale));
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.modelViewerLoadState i {
+  width: calc(7px * var(--layout-scale));
+  height: calc(7px * var(--layout-scale));
+  border-radius: 50%;
+  background: rgba(158, 197, 255, 0.88);
+  box-shadow: 0 0 calc(12px * var(--layout-scale)) rgba(110, 166, 255, 0.78);
+  animation: modelViewerPulse 0.9s ease-in-out infinite alternate;
+}
+
+.modelViewerLoadState.is-error { color: rgba(238, 160, 166, 0.78); }
+
+@keyframes modelViewerPulse { to { opacity: 0.28; transform: scale(0.72); } }
+
+/* Keep the frame-ring bar geometry; only divide its content into two actions. */
+.frameRingBottomActions.modelViewerBottomActions {
+  width: min(
+    calc(360px * var(--frame-ring-layout-scale)),
+    calc(100vw - 120px * var(--frame-ring-layout-scale))
+  );
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.modelViewerExportOverlay {
+  z-index: 80;
+}
+
+.modelViewerExportDialog {
+  width: 520px;
+  gap: 16px;
+}
+
+.modelViewerExportOptions {
+  display: grid;
+  align-items: end;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr);
+  gap: 12px;
+}
+
+.modelViewerDialogSelect {
+  position: relative;
+}
+
+.modelViewerDialogSelect select {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: rgba(241, 242, 245, 0.9);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 0 24px 0 0;
+}
+
+.modelViewerDialogSelect > svg {
+  position: absolute;
+  right: 12px;
+  color: rgba(195, 207, 226, 0.5);
+  pointer-events: none;
+}
+
+.modelViewerDialogToggle {
+  display: flex;
+  height: 42px;
+  box-sizing: border-box;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: rgba(214, 221, 233, 0.58);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 13px;
+}
+
+.modelViewerDialogToggle input {
+  accent-color: #9fc6ff;
+}
+
+.modelViewerDialogStatus {
+  min-height: 14px;
+  overflow: hidden;
+  margin: -4px 0 0;
+  color: rgba(175, 205, 248, 0.58);
+  font-size: 10px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modelViewerDialogStatus.is-error { color: rgba(239, 156, 164, 0.72); }
+.modelViewerDialogStatus.is-done { color: rgba(173, 219, 200, 0.68); }

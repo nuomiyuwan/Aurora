@@ -1,0 +1,2 @@
+export const PAGE_TRANSITION_EXIT_MS = 220
+export const PAGE_TRANSITION_ENTER_MS = 440

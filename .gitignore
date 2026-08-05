@@ -1,0 +1,66 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+release
+output
+test-results
+playwright-report
+blob-report
+.playwright-cli
+.vite
+docs/superpowers
+docs/history
+HANDOFF.md
+*.local
+
+# Local development / QA material
+.codex-qa
+.superpowers
+artifacts
+archive
+design-qa.md
+CODEX_OPENING_PROMPT.md
+RENDERING_REBUILD_HANDOFF.md
+WINDOWS_HANDOFF.md
+/aurora-*.png
+/tmp-*.png
+
+# Environment files, signing material and local credentials
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.cer
+*.mobileprovision
+
+# Electron user data must never enter source control
+aurora-data.json*
+ai-credentials.json*
+emby-connection.json*
+**/Cookies
+**/Cookies-journal
+**/Session Storage
+**/Local Storage
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

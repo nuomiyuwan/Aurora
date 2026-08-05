@@ -1,0 +1,260 @@
+.auroraApp.view-model-library {
+  --stage-background-image: url('/aurora/Project-Details-Background.png');
+  perspective: none;
+}
+
+.view-model-library .topTools { display: none; }
+
+.view-model-library .stageBackground {
+  background-color: #030407;
+  opacity: 0.92;
+  transform: translate3d(var(--camera-bg-x), var(--camera-bg-y), 0) scale(1.12);
+}
+
+.modelLibraryView {
+  position: absolute;
+  z-index: 9;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+.modelLibraryView[data-page-active='false'] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Reuse the media-library geometry and visual system verbatim. */
+.modelLibraryView > .modelLibraryToolbar {
+  position: absolute;
+  z-index: 70;
+  top: var(--detail-toolbar-top);
+  left: var(--detail-toolbar-left);
+  display: flex;
+  gap: calc(8px * var(--detail-ui-scale));
+  isolation: isolate;
+}
+
+.modelLibraryToolbar .videoLibraryFilterControl:nth-child(1) > .videoLibraryFilterButton {
+  width: calc(108px * var(--detail-ui-scale));
+}
+
+.modelLibraryToolbar .videoLibraryFilterControl:nth-child(2) > .videoLibraryFilterButton {
+  width: calc(112px * var(--detail-ui-scale));
+}
+
+.modelLibraryToolbar .videoLibraryFilterControl:nth-child(3) > .videoLibraryFilterButton {
+  width: calc(94px * var(--detail-ui-scale));
+}
+
+.modelLibraryToolbar .videoLibraryFilterControl:nth-child(4) > .videoLibraryFilterButton {
+  width: calc(98px * var(--detail-ui-scale));
+}
+
+.modelLibraryToolbar .videoLibraryFilterButton[aria-pressed='true'] > svg {
+  transform: rotate(180deg);
+}
+
+.modelAssetStage {
+  user-select: none;
+}
+
+.modelAssetCameraRig {
+  pointer-events: none;
+}
+
+.modelAssetCard {
+  appearance: none;
+  pointer-events: none;
+}
+
+.modelAssetCard .videoClipImage {
+  display: grid;
+  place-items: center;
+  background-position: center;
+  background-size: cover;
+}
+
+.modelAssetPlaceholder {
+  color: rgba(155, 190, 239, 0.46);
+  filter: drop-shadow(0 0 calc(18px * var(--detail-card-scale)) rgba(104, 157, 238, 0.24));
+}
+
+.modelActionSummaryPlaceholder {
+  display: grid !important;
+  width: 82px;
+  height: 52px;
+  box-sizing: border-box;
+  place-items: center;
+  border-radius: 8px;
+  background: rgba(10, 18, 31, 0.42);
+  color: rgba(155, 190, 239, 0.48);
+}
+
+.modelAssetCard .clipDuration {
+  max-width: 44%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modelAssetCard .clipTagList em {
+  max-width: 43%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modelLibraryView > .modelLibraryDetailStage {
+  position: absolute;
+  z-index: 5;
+  top: var(--detail-grid-top);
+  right: calc(var(--detail-viewport-width) - var(--detail-grid-right-edge));
+  bottom: calc(var(--detail-viewport-height) - var(--detail-grid-bottom-edge));
+  left: var(--detail-grid-left);
+  width: auto;
+  height: auto;
+  perspective: calc(1221.237525px * var(--detail-scene-scale) * var(--camera-focal-scale));
+  perspective-origin: 54% 52%;
+  pointer-events: none;
+  transform-style: preserve-3d;
+}
+
+.modelLibraryDetailPanel {
+  pointer-events: auto;
+}
+
+.modelLibraryDetailPreview {
+  background-position: center;
+  background-size: cover;
+}
+
+.modelLibraryDetailPreview > svg {
+  align-self: center;
+  justify-self: center;
+}
+
+.modelLibraryEmptyState {
+  position: absolute;
+  z-index: 62;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  width: calc(360px * var(--detail-ui-scale));
+  min-height: calc(166px * var(--detail-ui-scale));
+  box-sizing: border-box;
+  align-content: center;
+  justify-items: center;
+  gap: calc(10px * var(--detail-ui-scale));
+  border: calc(1px * var(--detail-ui-scale)) solid transparent;
+  border-radius: calc(16px * var(--detail-ui-scale));
+  color: rgba(191, 207, 231, 0.46);
+  padding: calc(26px * var(--detail-ui-scale)) calc(30px * var(--detail-ui-scale));
+  text-align: center;
+  transform: translate(-50%, -50%);
+}
+
+/*
+ * The empty-state backdrop lives in App-root screen space so Chromium can
+ * compose it while the 3D library is still hidden. The content above remains
+ * in the page transition layer; only this persistent surface owns blur.
+ */
+.modelLibraryEmptyProjectedGlass {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: calc(360px * var(--detail-ui-scale));
+  min-height: calc(166px * var(--detail-ui-scale));
+  box-sizing: border-box;
+  border-radius: calc(16px * var(--detail-ui-scale));
+  opacity: 0.001 !important;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+
+.modelLibraryProjectedGlassLayer[data-glass-active='true'][data-glass-cache-valid='true']
+  > .modelLibraryEmptyProjectedGlass[data-empty-visible='true'] {
+  opacity: 1 !important;
+}
+
+.modelLibraryEmptyState strong {
+  color: rgba(231, 237, 246, 0.78);
+  font-size: calc(14px * var(--detail-ui-scale));
+  font-weight: 500;
+}
+
+.modelLibraryEmptyState small {
+  max-width: calc(300px * var(--detail-ui-scale));
+  font-size: calc(10.5px * var(--detail-ui-scale));
+  line-height: 1.65;
+}
+
+.modelLibraryEmptyState button {
+  display: flex;
+  height: calc(36px * var(--detail-ui-scale));
+  align-items: center;
+  gap: calc(7px * var(--detail-ui-scale));
+  border-radius: calc(9px * var(--detail-ui-scale));
+  color: rgba(188, 216, 255, 0.8);
+  font-size: calc(11px * var(--detail-ui-scale));
+  padding: 0 calc(18px * var(--detail-ui-scale));
+}
+
+.modelLibraryCount {
+  position: absolute;
+  bottom: var(--detail-count-bottom-inset);
+  left: 50%;
+  color: rgba(211, 216, 226, 0.54);
+  font-size: calc(12px * var(--detail-ui-scale));
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+.modelLibraryImportNotice {
+  position: absolute;
+  z-index: 82;
+  right: calc(72px * var(--detail-ui-scale));
+  bottom: calc(56px * var(--detail-ui-scale));
+  display: flex;
+  max-width: calc(360px * var(--detail-ui-scale));
+  align-items: center;
+  gap: calc(9px * var(--detail-ui-scale));
+  border-radius: calc(10px * var(--detail-ui-scale));
+  color: rgba(211, 223, 241, 0.68);
+  font-size: calc(10px * var(--detail-ui-scale));
+  padding: calc(10px * var(--detail-ui-scale)) calc(14px * var(--detail-ui-scale));
+}
+
+.modelLibraryImportNotice i {
+  width: calc(7px * var(--detail-ui-scale));
+  height: calc(7px * var(--detail-ui-scale));
+  border-radius: 50%;
+  background: #9fc7ff;
+  box-shadow: 0 0 calc(12px * var(--detail-ui-scale)) rgba(123, 177, 255, 0.8);
+  animation: modelImportPulse 0.7s ease-in-out infinite alternate;
+}
+
+.modelLibraryImportNotice.is-error { color: rgba(239, 155, 163, 0.76); }
+
+@keyframes modelImportPulse { to { opacity: 0.28; } }
+
+.modelLibraryDropGuide {
+  position: absolute;
+  z-index: 90;
+  inset: calc(66px * var(--detail-scene-scale)) calc(98px * var(--detail-scene-scale)) calc(54px * var(--detail-scene-scale));
+  display: grid;
+  place-items: center;
+  border: calc(1px * var(--detail-scene-scale)) dashed rgba(164, 196, 245, 0.38);
+  border-radius: calc(22px * var(--detail-scene-scale));
+  background: rgba(5, 10, 18, 0.2);
+  pointer-events: none;
+}
+
+.modelLibraryDropGuide span {
+  display: flex;
+  align-items: center;
+  gap: calc(10px * var(--detail-ui-scale));
+  border-radius: calc(12px * var(--detail-ui-scale));
+  color: rgba(220, 232, 249, 0.78);
+  padding: calc(16px * var(--detail-ui-scale)) calc(22px * var(--detail-ui-scale));
+}

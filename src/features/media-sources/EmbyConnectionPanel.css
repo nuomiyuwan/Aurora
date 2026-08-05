@@ -1,0 +1,163 @@
+.embyConnectionPanel .pageSettingsBody > form {
+  display: contents;
+}
+
+.embyConnectionPanel .pageSettingsTextInput:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+
+.embyConnectionStatus {
+  display: grid;
+  min-height: 58px;
+  box-sizing: border-box;
+  align-items: center;
+  gap: 10px;
+  border-radius: 9px;
+  color: inherit;
+  grid-template-columns: 10px minmax(0, 1fr);
+  padding: 10px 11px;
+}
+
+.embyConnectionStatusDot {
+  display: block;
+  width: 7px;
+  height: 7px;
+  box-sizing: border-box;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  opacity: 0.62;
+}
+
+.embyConnectionPanel[data-connection-status='connecting']
+  .embyConnectionStatusDot {
+  animation: embyConnectionPulse 900ms ease-in-out infinite alternate;
+}
+
+.embyConnectionPanel[data-connection-status='connected']
+  .embyConnectionStatusDot {
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+  opacity: 0.82;
+}
+
+.embyConnectionPanel[data-connection-status='error']
+  .embyConnectionStatusDot {
+  border-style: double;
+  opacity: 0.82;
+}
+
+.embyConnectionStatus strong,
+.embyConnectionStatus small {
+  display: block;
+}
+
+.embyConnectionStatus strong {
+  color: inherit;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.embyConnectionStatus small {
+  overflow: hidden;
+  margin-top: 4px;
+  opacity: 0.48;
+  font-size: 8.5px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+}
+
+.embyConnectionSummary {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.embyConnectionSummary > div {
+  display: grid;
+  min-width: 0;
+  align-items: baseline;
+  gap: 10px;
+  grid-template-columns: 48px minmax(0, 1fr);
+}
+
+.embyConnectionSummary dt,
+.embyConnectionSummary dd {
+  min-width: 0;
+  margin: 0;
+  font-size: 9px;
+}
+
+.embyConnectionSummary dt {
+  opacity: 0.4;
+}
+
+.embyConnectionSummary dd {
+  overflow: hidden;
+  opacity: 0.68;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.embyConnectionPasswordNote,
+.embyConnectionBridgeNote,
+.embyConnectionDisclosure {
+  margin: 0;
+  color: inherit;
+  font-size: 8.5px;
+  line-height: 1.65;
+  opacity: 0.4;
+}
+
+.embyConnectionPasswordNote {
+  margin-top: -5px;
+}
+
+.embyConnectionBridgeNote {
+  margin-top: -5px;
+  text-align: center;
+}
+
+.embyConnectionDisclosure {
+  opacity: 0.5;
+}
+
+.embyConnectionAction svg {
+  flex: 0 0 auto;
+}
+
+.embyConnectionAction:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.embyConnectionAction .isSpinning {
+  animation: embyConnectionSpin 800ms linear infinite;
+}
+
+@keyframes embyConnectionSpin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+@keyframes embyConnectionPulse {
+  from {
+    opacity: 0.24;
+    transform: scale(0.82);
+  }
+
+  to {
+    opacity: 0.82;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .embyConnectionPanel .isSpinning,
+  .embyConnectionPanel[data-connection-status='connecting']
+    .embyConnectionStatusDot {
+    animation: none;
+  }
+}

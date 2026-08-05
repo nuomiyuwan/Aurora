@@ -1,0 +1,1699 @@
+.auroraApp.view-online-search {
+  --stage-background-image: url('/aurora/frame-ring-background.png');
+  --discovery-ui-text-strong: rgba(240, 245, 253, 0.84);
+  --discovery-ui-text: rgba(224, 232, 244, 0.68);
+  --discovery-ui-text-soft: rgba(202, 212, 228, 0.42);
+  --discovery-ui-chip-text: rgba(214, 224, 239, 0.52);
+  --discovery-ui-border: rgba(218, 228, 244, 0.08);
+  --discovery-ui-border-strong: rgba(216, 228, 246, 0.16);
+  --discovery-ui-control-surface: rgba(5, 9, 15, 0.16);
+  --discovery-ui-accent: rgba(170, 205, 255, 0.88);
+  --discovery-ui-accent-muted: rgba(168, 200, 248, 0.58);
+  --discovery-ui-accent-border: rgba(172, 205, 255, 0.5);
+  --discovery-ui-accent-surface: rgba(105, 150, 224, 0.1);
+  --discovery-ui-accent-glow: rgba(117, 164, 247, 0.23);
+  perspective: none;
+}
+
+.view-online-search .stageBackground {
+  background-color: #020408;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+  filter: brightness(0.56) saturate(0.72);
+  opacity: 0.72;
+  transform: translate3d(var(--camera-bg-x), var(--camera-bg-y), 0) scale(1.08);
+}
+
+.auroraApp.hasPageColorGrade.view-online-search .stageBackground {
+  filter: brightness(0.56) saturate(0.72) var(--page-color-grade-filter);
+}
+
+.view-online-search .brandHeader,
+.view-online-search .sideDock,
+.view-online-search .topTools {
+  z-index: 30;
+}
+
+.view-online-search .topTools {
+  display: none;
+}
+
+.discoveryView {
+  position: absolute;
+  z-index: 9;
+  inset: 0;
+  overflow: clip;
+  color: var(--discovery-ui-text);
+  pointer-events: auto;
+  transform-style: preserve-3d;
+}
+
+.discoveryView[data-page-active='false'] {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.discoveryView[data-page-active='true'] {
+  visibility: visible;
+}
+
+.discoveryReflectionCanvas {
+  position: absolute;
+  z-index: 8;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  mix-blend-mode: normal;
+  pointer-events: none;
+}
+
+.discoveryReflectionCanvas[data-reflection-active='false'] {
+  visibility: hidden;
+}
+
+.discoveryReflectionCanvas[data-results-visible='false'] {
+  opacity: 0;
+}
+
+.discoveryProjectedGlassLayer {
+  --discovery-detail-backdrop-blur: calc(8px * var(--layout-scale));
+  position: absolute;
+  z-index: 8;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.discoveryProjectedGlassLayer:not([data-glass-active='true'][data-glass-cache-valid='true'])
+  > .discoveryDetailProjectedGlass {
+  opacity: 0 !important;
+}
+
+.discoveryProjectedGlassLayer[data-results-visible='false']
+  > .discoveryDetailProjectedGlass {
+  opacity: 0 !important;
+}
+
+.discoveryDetailProjectedGlass {
+  position: absolute;
+  visibility: hidden;
+  overflow: hidden;
+  border-radius: 0;
+  background: transparent;
+  opacity: var(--projected-glass-opacity, 0);
+  pointer-events: none;
+  transform: none;
+  transition: opacity 320ms ease 90ms;
+  backdrop-filter:
+    blur(var(--discovery-detail-backdrop-blur))
+    saturate(1.08)
+    brightness(0.92);
+  -webkit-backdrop-filter:
+    blur(var(--discovery-detail-backdrop-blur))
+    saturate(1.08)
+    brightness(0.92);
+}
+
+.discoveryPlane {
+  position: absolute;
+  z-index: 1;
+  top: var(--layout-plane-top);
+  left: var(--layout-plane-left);
+  width: 1706px;
+  height: 956px;
+  transform: scale3d(
+    var(--layout-scale),
+    var(--layout-scale),
+    var(--layout-scale)
+  );
+  transform-origin: left top;
+  transform-style: preserve-3d;
+  pointer-events: none;
+}
+
+.discoverySearchCluster {
+  position: absolute;
+  z-index: 15;
+  inset: 0;
+  --discovery-search-offset-x: 215px;
+  --discovery-search-offset-y: 343px;
+  pointer-events: none;
+}
+
+.discoverySearchCluster[data-search-position='results'] {
+  --discovery-search-offset-x: 0px;
+  --discovery-search-offset-y: 0px;
+}
+
+.discoverySearchCluster[data-page-active='false'] {
+  visibility: hidden;
+}
+
+.auroraApp .discoverySearchBar {
+  position: absolute;
+  top: calc(
+    var(--layout-plane-top) +
+    108px * var(--layout-scale)
+  );
+  left: calc(
+    var(--layout-plane-left) +
+    228px * var(--layout-scale)
+  );
+  display: grid;
+  box-sizing: border-box;
+  width: 820px;
+  height: 54px;
+  grid-template-columns: 22px minmax(0, 1fr) auto 40px;
+  align-items: center;
+  gap: 12px;
+  border-color: var(--ui-2d-border-color);
+  border-radius: 18px;
+  background: rgba(10, 15, 24, 0.1);
+  background-clip: padding-box;
+  box-shadow: none;
+  padding: 0 7px 0 18px;
+  pointer-events: auto;
+  transform:
+    translate3d(
+      calc(var(--discovery-search-offset-x) * var(--layout-scale)),
+      calc(var(--discovery-search-offset-y) * var(--layout-scale)),
+      0
+    )
+    scale(var(--layout-scale));
+  transform-origin: left top;
+  transition: transform 520ms cubic-bezier(0.16, 0.82, 0.2, 1);
+  backdrop-filter: blur(18px) saturate(1.08);
+  -webkit-backdrop-filter: blur(18px) saturate(1.08);
+}
+
+.discoverySearchBar > svg {
+  color: rgba(202, 205, 214, 0.58);
+}
+
+.discoverySearchBar input {
+  width: 100%;
+  min-width: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  outline: 0;
+  background: none !important;
+  background-color: transparent !important;
+  box-shadow: none !important;
+  color: var(--discovery-ui-text-strong);
+  font-size: 14px;
+  letter-spacing: 0.01em;
+  padding: 0;
+}
+
+.discoverySearchBar input:focus,
+.discoverySearchBar input:focus-visible {
+  outline: 0;
+  background: none !important;
+  background-color: transparent !important;
+  box-shadow: none !important;
+}
+
+.discoverySearchBar input::placeholder {
+  color: rgba(202, 210, 224, 0.38);
+}
+
+.discoveryAiSearchToggle {
+  display: inline-flex;
+  box-sizing: border-box;
+  height: 30px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(211, 222, 239, 0.1);
+  border-radius: 10px;
+  background: rgba(3, 7, 13, 0.16);
+  color: rgba(194, 204, 219, 0.48);
+  cursor: pointer;
+  padding: 0 8px;
+  transition:
+    border-color 180ms ease,
+    background-color 180ms ease,
+    color 180ms ease;
+}
+
+.discoveryAiSearchToggle:hover {
+  border-color: rgba(177, 205, 247, 0.24);
+  color: rgba(222, 232, 247, 0.72);
+}
+
+.discoveryAiSearchToggle[aria-pressed='true'] {
+  border-color: rgba(166, 201, 255, 0.38);
+  background: rgba(92, 137, 207, 0.12);
+  color: rgba(215, 230, 252, 0.88);
+}
+
+.discoveryAiSearchToggle[data-configured='false']:not([aria-pressed='true']) {
+  color: rgba(181, 190, 205, 0.38);
+}
+
+.discoveryAiSearchLabel {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+
+.discoveryAiSearchSwitch {
+  position: relative;
+  display: block;
+  box-sizing: border-box;
+  width: 23px;
+  height: 13px;
+  border: 1px solid rgba(208, 218, 235, 0.15);
+  border-radius: 99px;
+  background: rgba(1, 4, 9, 0.3);
+  transition:
+    border-color 180ms ease,
+    background-color 180ms ease;
+}
+
+.discoveryAiSearchSwitch > span {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(199, 208, 222, 0.58);
+  transition:
+    background-color 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms cubic-bezier(0.18, 0.76, 0.2, 1);
+}
+
+.discoveryAiSearchToggle[aria-pressed='true'] .discoveryAiSearchSwitch {
+  border-color: rgba(169, 204, 255, 0.42);
+  background: rgba(97, 148, 226, 0.22);
+}
+
+.discoveryAiSearchToggle[aria-pressed='true'] .discoveryAiSearchSwitch > span {
+  background: rgba(219, 235, 255, 0.94);
+  box-shadow: 0 0 8px rgba(117, 167, 245, 0.62);
+  transform: translateX(10px);
+}
+
+.discoverySearchSubmit {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 1px solid var(--discovery-ui-accent-border);
+  border-radius: 12px;
+  background: linear-gradient(
+    180deg,
+    rgba(93, 133, 199, 0.2),
+    rgba(48, 78, 129, 0.12)
+  );
+  box-shadow: none;
+  color: rgba(211, 227, 251, 0.86);
+  cursor: pointer;
+  transition: border-color 180ms ease, background-color 180ms ease, transform 180ms ease;
+}
+
+.discoverySearchSubmit:hover:not(:disabled) {
+  border-color: rgba(184, 213, 255, 0.72);
+  color: rgba(236, 243, 255, 0.96);
+  transform: translateX(1px);
+}
+
+.discoverySearchSubmit:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
+.discoverySearchSubmit:disabled svg {
+  animation: discoverySpin 900ms linear infinite;
+}
+
+.discoveryFilterRow {
+  --discovery-search-reveal-y: 0px;
+  position: absolute;
+  top: calc(
+    var(--layout-plane-top) +
+    176px * var(--layout-scale)
+  );
+  left: calc(
+    var(--layout-plane-left) +
+    228px * var(--layout-scale)
+  );
+  display: flex;
+  height: 30px;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  opacity: 1;
+  pointer-events: auto;
+  transform:
+    translate3d(
+      calc(var(--discovery-search-offset-x) * var(--layout-scale)),
+      calc(var(--discovery-search-offset-y) * var(--layout-scale)),
+      0
+    )
+    translateY(
+      calc(var(--discovery-search-reveal-y) * var(--layout-scale))
+    )
+    scale(var(--layout-scale));
+  transform-origin: left top;
+  transition:
+    opacity 220ms ease 220ms,
+    transform 320ms cubic-bezier(0.16, 0.82, 0.2, 1) 220ms;
+}
+
+.auroraApp .discoveryModeChip,
+.auroraApp .discoverySourceFilters,
+.auroraApp .discoveryFilterSelect {
+  box-sizing: border-box;
+  height: 30px;
+  border-radius: 10px;
+}
+
+.discoveryModeChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: rgba(202, 205, 214, 0.58);
+  font-size: 11px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.discoveryModeChip svg {
+  filter: none;
+}
+
+.discoverySourceFilters {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+}
+
+.discoverySourceFilters button {
+  height: 24px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--discovery-ui-text-soft);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 10px;
+  transition: color 170ms ease, background-color 170ms ease;
+}
+
+.discoverySourceFilters button:hover,
+.discoverySourceFilters button.active {
+  background-color: var(--discovery-ui-accent-surface);
+  color: var(--discovery-ui-accent);
+}
+
+.discoveryFilterSelect {
+  position: relative;
+  display: grid;
+  min-width: 126px;
+  grid-template-columns: auto minmax(0, 1fr) 12px;
+  align-items: center;
+  gap: 6px;
+  color: var(--discovery-ui-text-soft);
+  font-size: 10px;
+  padding: 0 10px;
+}
+
+.discoveryFilterSelect select {
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  appearance: none;
+  background: transparent;
+  color: var(--discovery-ui-text);
+  cursor: pointer;
+  font-size: 10px;
+  text-align: right;
+}
+
+.discoveryFilterSelect option {
+  background: #090d15;
+  color: var(--discovery-ui-text-strong);
+}
+
+.discoveryFilterSelect svg {
+  color: var(--discovery-ui-text-soft);
+  pointer-events: none;
+}
+
+.discoverySearchHint {
+  --discovery-search-reveal-y: 0px;
+  position: absolute;
+  top: calc(
+    var(--layout-plane-top) +
+    216px * var(--layout-scale)
+  );
+  left: calc(
+    var(--layout-plane-left) +
+    300px * var(--layout-scale)
+  );
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  color: var(--discovery-ui-text-soft);
+  font-size: 10px;
+  opacity: 1;
+  transform:
+    translate3d(
+      calc(var(--discovery-search-offset-x) * var(--layout-scale)),
+      calc(var(--discovery-search-offset-y) * var(--layout-scale)),
+      0
+    )
+    translateY(
+      calc(var(--discovery-search-reveal-y) * var(--layout-scale))
+    )
+    scale(var(--layout-scale));
+  transform-origin: left top;
+  transition:
+    opacity 220ms ease 280ms,
+    transform 320ms cubic-bezier(0.16, 0.82, 0.2, 1) 280ms;
+}
+
+.discoverySearchHint svg {
+  color: var(--discovery-ui-accent-muted);
+}
+
+.discoverySearchCluster[data-search-position='center'] .discoveryFilterRow,
+.discoverySearchCluster[data-search-position='center'] .discoverySearchHint {
+  --discovery-search-reveal-y: 9px;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition-delay: 0ms;
+}
+
+.discoverySpatialStage {
+  position: absolute;
+  z-index: 8;
+  inset: 0;
+  perspective: calc(1480px * var(--camera-focal-scale));
+  perspective-origin: 54% 52%;
+  pointer-events: none;
+  transform-style: preserve-3d;
+}
+
+.discoverySpatialStage[data-results-visible='false'] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.discoveryCameraRig {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  transform:
+    translate3d(
+      var(--camera-design-pan-x),
+      var(--camera-design-pan-y),
+      0
+    )
+    rotateX(calc(var(--camera-pitch) * 0.42))
+    rotateY(calc(var(--camera-yaw) * 0.42));
+  transform-origin: 54% 52%;
+  transform-style: preserve-3d;
+  transition: transform 260ms cubic-bezier(0.18, 0.72, 0.2, 1);
+  will-change: transform;
+}
+
+.auroraApp.isCameraDragging .discoveryCameraRig {
+  transition: none;
+}
+
+.discoveryResultStage {
+  position: absolute;
+  top: 230px;
+  left: 118px;
+  z-index: 8;
+  width: 1110px;
+  height: 590px;
+  pointer-events: none;
+  transform-style: preserve-3d;
+}
+
+.discoveryResultCards {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  animation: discoveryCardIn 520ms 80ms both;
+}
+
+.discoveryResultCards.isStaticLayout {
+  animation: none;
+}
+
+.discoveryResultCard {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: block;
+  width: var(--discovery-card-base-width);
+  aspect-ratio: 2896 / 2160;
+  overflow: visible;
+  border: 0;
+  background: transparent;
+  color: var(--discovery-ui-text);
+  padding: 0;
+  pointer-events: none;
+  transform:
+    translate3d(
+      var(--discovery-corridor-x, var(--discovery-card-x)),
+      var(--discovery-corridor-y, var(--discovery-card-y)),
+      var(--discovery-corridor-depth, var(--discovery-card-depth))
+    )
+    translate(-50%, -50%)
+    rotateY(
+      var(
+        --discovery-corridor-rotate-y,
+        var(--discovery-card-rotate-y)
+      )
+    )
+    rotateZ(
+      var(
+        --discovery-corridor-rotate-z,
+        var(--discovery-card-rotate-z)
+      )
+    )
+    scale(
+      var(--discovery-corridor-scale, var(--discovery-card-scale))
+    );
+  transform-origin: center;
+  transform-style: preserve-3d;
+  z-index:
+    var(--discovery-corridor-order, var(--discovery-card-order));
+  transition:
+    transform 360ms cubic-bezier(0.18, 0.78, 0.2, 1);
+  will-change: transform;
+}
+
+.discoveryResultCards:is(.isCorridorMoving, .isCorridorResetting)
+  .discoveryResultCard {
+  transition: none;
+}
+
+.discoveryResultCards.isStaticLayout .discoveryResultCard {
+  z-index: var(--discovery-card-order);
+  transform:
+    translate3d(
+      var(--discovery-card-x),
+      var(--discovery-card-y),
+      var(--discovery-card-depth)
+    )
+    translate(-50%, -50%)
+    rotateY(var(--discovery-card-rotate-y))
+    rotateZ(var(--discovery-card-rotate-z))
+    scale(var(--discovery-card-scale));
+  transition: none;
+}
+
+.discoveryResultCards.isStaticLayout .discoveryResultMotion {
+  opacity: var(--discovery-card-motion-opacity, 1);
+}
+
+.discoveryResultCards.isStaticLayout .discoveryResultMedia {
+  filter:
+    brightness(var(--discovery-card-brightness, 0.82))
+    saturate(var(--discovery-card-saturation, 0.78));
+}
+
+.discoveryResultCards.isStaticLayout.isCorridorMoving
+  .discoveryResultCard {
+  z-index:
+    var(--discovery-corridor-order, var(--discovery-card-order));
+  transform:
+    translate3d(
+      var(--discovery-corridor-x, var(--discovery-card-x)),
+      var(--discovery-corridor-y, var(--discovery-card-y)),
+      var(--discovery-corridor-depth, var(--discovery-card-depth))
+    )
+    translate(-50%, -50%)
+    rotateY(
+      var(
+        --discovery-corridor-rotate-y,
+        var(--discovery-card-rotate-y)
+      )
+    )
+    rotateZ(
+      var(
+        --discovery-corridor-rotate-z,
+        var(--discovery-card-rotate-z)
+      )
+    )
+    scale(
+      var(--discovery-corridor-scale, var(--discovery-card-scale))
+    );
+}
+
+.discoveryResultCards.isStaticLayout.isCorridorMoving
+  .discoveryResultMotion {
+  opacity:
+    var(
+      --discovery-corridor-opacity,
+      var(--discovery-card-motion-opacity, 1)
+    );
+}
+
+.discoveryResultCards.isStaticLayout.isCorridorMoving
+  .discoveryResultMedia {
+  filter:
+    brightness(
+      var(
+        --discovery-corridor-brightness,
+        var(--discovery-card-brightness, 0.82)
+      )
+    )
+    saturate(
+      var(
+        --discovery-corridor-saturation,
+        var(--discovery-card-saturation, 0.78)
+      )
+    );
+}
+
+.discoveryResultCards.isCorridorMoving .discoveryResultHit {
+  pointer-events: none;
+}
+
+.discoveryResultCards.isSelectionTransitioning .discoveryResultHit {
+  pointer-events: none;
+}
+
+.discoveryResultCard.isPreloadGuard .discoveryResultHit {
+  pointer-events: none;
+}
+
+.discoveryResultCards.isCorridorMoving
+  :is(
+    .discoveryResultMotion,
+    .discoveryResultVisual,
+    .discoveryResultMedia,
+    .discoveryResultFrame
+  ) {
+  transition: none;
+}
+
+.discoveryResultMotion {
+  --discovery-focus-filter-brightness: 1;
+  --discovery-focus-filter-saturation: 1;
+  --discovery-focus-filter-blur: 0px;
+  --discovery-card-selection-start-lift-y: 0px;
+  --discovery-card-selection-start-rotate-y: 0deg;
+  --discovery-card-selection-start-rotate-z: 0deg;
+  --discovery-card-selection-start-scale: 1;
+  --page-local-filter:
+    brightness(var(--discovery-focus-filter-brightness))
+    saturate(var(--discovery-focus-filter-saturation))
+    blur(var(--discovery-focus-filter-blur));
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  filter: var(--page-local-filter);
+  opacity:
+    var(
+      --discovery-corridor-opacity,
+      var(--discovery-card-motion-opacity, 1)
+    );
+  pointer-events: none;
+  transform:
+    translate3d(
+      0,
+      var(--discovery-card-focus-lift-y, 0px),
+      var(--discovery-card-focus-depth, 0px)
+    )
+    rotateY(var(--discovery-card-focus-rotate-y, 0deg))
+    rotateZ(var(--discovery-card-focus-rotate-z, 0deg))
+    scale(var(--discovery-card-focus-scale, 1));
+  transform-origin: 50% 90.185185%;
+  transform-style: preserve-3d;
+  transition:
+    filter 200ms ease,
+    opacity 200ms ease,
+    transform 220ms cubic-bezier(0.2, 0.78, 0.2, 1);
+  will-change: transform;
+}
+
+.discoveryResultVisual,
+.discoveryResultBackdrop,
+.discoveryResultMedia,
+.discoveryResultFrame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.discoveryResultVisual {
+  overflow: visible;
+  filter: none;
+  opacity: var(--discovery-card-opacity, 1);
+  pointer-events: none;
+  transform-style: flat;
+  transition:
+    filter 260ms ease,
+    opacity 180ms ease;
+}
+
+.discoveryResultBackdrop {
+  z-index: 2;
+  background:
+    linear-gradient(
+      180deg,
+      rgba(4, 7, 12, 0.02) 12%,
+      rgba(4, 7, 12, 0.08) 54%,
+      rgba(2, 5, 9, 0.74) 90%
+    ),
+    rgba(8, 13, 22, 0.06);
+  mask: url('/aurora/home-kuang-alpha-2k.png') center / 100% 100% no-repeat;
+  -webkit-mask: url('/aurora/home-kuang-alpha-2k.png') center / 100% 100% no-repeat;
+  pointer-events: none;
+}
+
+.discoveryResultMedia {
+  z-index: 1;
+  object-fit: cover;
+  mask: url('/aurora/home-kuang-alpha-2k.png') center / 100% 100% no-repeat;
+  -webkit-mask: url('/aurora/home-kuang-alpha-2k.png') center / 100% 100% no-repeat;
+  filter:
+    brightness(
+      var(
+        --discovery-corridor-brightness,
+        var(--discovery-card-brightness, 0.82)
+      )
+    )
+    saturate(
+      var(
+        --discovery-corridor-saturation,
+        var(--discovery-card-saturation, 0.78)
+      )
+    );
+  pointer-events: none;
+}
+
+.discoveryResultFrame {
+  z-index: 3;
+  object-fit: fill;
+  filter: var(--asset-ui-tint-filter);
+  pointer-events: none;
+  transition: filter 260ms ease;
+}
+
+.discoveryResultCard:is(.selected, .isCorridorFront)
+  .discoveryResultVisual {
+  filter: brightness(1.05);
+}
+
+.discoveryResultCard:is(.selected, .isCorridorFront)
+  .discoveryResultFrame {
+  filter:
+    brightness(1.12)
+    var(--asset-ui-tint-filter);
+}
+
+.discoveryResultCards.hasHoverFocus
+  .discoveryResultCard:not(.selected):not(.isCorridorFront):not(.isHoverFocused)
+  .discoveryResultMotion {
+  --discovery-focus-filter-brightness: 0.93;
+  --discovery-focus-filter-saturation: 0.9;
+  --discovery-focus-filter-blur: 0px;
+}
+
+.discoveryResultCards.hasHoverFocus
+  .discoveryResultCard.isHoverFocused
+  .discoveryResultMotion {
+  --discovery-focus-filter-brightness:
+    var(--discovery-card-focus-brightness, 1);
+  --discovery-focus-filter-saturation:
+    var(--discovery-card-focus-saturation, 1);
+  --discovery-focus-filter-blur: 0px;
+}
+
+.discoveryResultCard.isSelectionTraveler
+  .discoveryResultMotion {
+  --discovery-focus-filter-brightness: 1.08;
+  --discovery-focus-filter-saturation: 1.05;
+  --discovery-focus-filter-blur: 0px;
+}
+
+.discoveryResultCards.isStaticLayout.isSelectionMoving
+  .discoveryResultCard {
+  transition: none;
+}
+
+.discoveryResultCards.isStaticLayout.isSelectionMoving
+  .discoveryResultCard.isSelectionMoving {
+  transition: none;
+}
+
+.discoveryResultCard.isSelectionMoving
+  .discoveryResultMotion {
+  animation:
+    discoveryCardSwitchInner
+      var(--discovery-card-switch-duration, 420ms)
+      cubic-bezier(0.4, 0, 0.2, 1)
+      both;
+}
+
+.discoveryResultCards.isStaticLayout.isSelectionMoving
+  .discoveryResultCard.isSelectionMaterialMoving:not(.isSelectionTraveler)
+  .discoveryResultMedia {
+  animation:
+    discoveryCardMaterialSwitch
+      var(--discovery-card-reflow-duration, 324ms)
+      cubic-bezier(0.4, 0, 0.2, 1)
+      var(--discovery-card-reflow-delay, 96ms)
+      both;
+}
+
+.discoveryResultCards.isStaticLayout.isSelectionMoving
+  .discoveryResultCard.isSelectionMaterialMoving.isSelectionTraveler
+  .discoveryResultMedia {
+  animation:
+    discoveryCardMaterialSwitch
+      var(--discovery-card-switch-duration, 420ms)
+      cubic-bezier(0.4, 0, 0.2, 1)
+      both;
+}
+
+.discoveryResultCards.isSelectionMoving
+  :is(
+    .discoveryResultMotion,
+    .discoveryResultVisual,
+    .discoveryResultMedia,
+    .discoveryResultFrame
+  ) {
+  transition: none;
+}
+
+.discoveryResultCards.isSelectionMoving
+  .discoveryResultCard:not(.isSelectionTraveler)
+  .discoveryResultMotion {
+  transition:
+    filter
+      var(--discovery-card-reflow-duration, 324ms)
+      cubic-bezier(0.4, 0, 0.2, 1)
+      var(--discovery-card-reflow-delay, 96ms);
+}
+
+.discoveryResultCards.isSelectionMoving
+  .discoveryResultCard.isSelectionTraveler
+  .discoveryResultMotion {
+  transition:
+    filter
+      var(--discovery-card-switch-duration, 420ms)
+      cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.discoveryResultCards.isSearching
+  .discoveryResultCard
+  .discoveryResultMotion {
+  --discovery-focus-filter-brightness: 1;
+  --discovery-focus-filter-saturation: 1;
+  --discovery-focus-filter-blur: 3px;
+  opacity: 0.34;
+}
+
+.discoveryResultCards.isSearching .discoveryResultHit {
+  pointer-events: none;
+}
+
+.discoveryResultHit {
+  position: absolute;
+  z-index: 8;
+  top: 9.63%;
+  left: 4.25%;
+  width: 91.47%;
+  height: 80.5%;
+  border: 0;
+  border-radius: 9%;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  pointer-events: auto;
+}
+
+.discoveryCardTopline,
+.discoveryCardCaption {
+  position: absolute;
+  z-index: 5;
+  right: 6.5%;
+  left: 6.5%;
+  display: flex;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.discoveryCardTopline {
+  top: 12.2%;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.92);
+}
+
+.discoveryCardTopline time {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.discoveryCardTopline > span {
+  display: flex;
+  gap: 5px;
+}
+
+.discoveryCardTopline em {
+  border: 1px solid rgba(232, 237, 248, 0.1);
+  border-radius: 4px;
+  background: var(--glass-surface);
+  color: rgba(235, 240, 250, 0.74);
+  font-size: 8px;
+  font-style: normal;
+  line-height: 16px;
+  padding: 0 5px;
+}
+
+.discoveryCardTopline em[data-source='local'],
+.discoveryCardTopline em[data-source='emby'],
+.discoveryCardTopline em[data-source='nas'] {
+  border-color: rgba(232, 237, 248, 0.1);
+  color: rgba(235, 240, 250, 0.74);
+}
+
+.discoveryCardCaption {
+  bottom: 12.4%;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-end;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  text-shadow: 0 2px 9px rgba(0, 0, 0, 0.96);
+}
+
+.discoveryCardCaptionFootage {
+  min-height: 54px;
+}
+
+.discoveryCardCaptionMedia {
+  min-height: 78px;
+}
+
+.discoveryCardCaption strong {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--discovery-ui-text-strong);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discoveryCardCaption small {
+  max-width: 100%;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--discovery-ui-text-soft);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discoveryCardCaptionTags {
+  display: flex;
+  max-width: 100%;
+  gap: 4px;
+  margin-top: 6px;
+  overflow: hidden;
+}
+
+.discoveryCardCaptionTags i {
+  border: 1px solid var(--discovery-ui-border);
+  border-radius: 5px;
+  background: var(--glass-chip-tint);
+  color: var(--discovery-ui-chip-text);
+  font-size: 8px;
+  font-style: normal;
+  line-height: 15px;
+  padding: 0 5px;
+  white-space: nowrap;
+}
+
+.discoveryCardMediaYear,
+.discoveryCardMediaGenres {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--discovery-ui-text-soft);
+  font-size: 8.5px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discoveryCardMediaYear {
+  margin-top: 5px;
+}
+
+.discoveryCardMediaGenres {
+  margin-top: 2px;
+  color: var(--discovery-ui-text);
+}
+
+.discoveryEmptyState {
+  position: absolute;
+  top: 46%;
+  left: 50%;
+  display: grid;
+  box-sizing: border-box;
+  width: 340px;
+  min-height: 150px;
+  place-items: center;
+  border: 1px solid var(--discovery-ui-border-strong);
+  border-radius: 16px;
+  background: rgba(12, 17, 25, 0.46);
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.28);
+  color: var(--discovery-ui-text-soft);
+  padding: 20px;
+  pointer-events: auto;
+  text-align: center;
+  transform: translate(-50%, -50%);
+}
+
+.discoveryEmptyState strong {
+  color: var(--discovery-ui-text-strong);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.discoveryEmptyState span {
+  font-size: 10px;
+  line-height: 1.7;
+}
+
+.auroraApp .discoveryDetailPanel {
+  --page-local-filter: drop-shadow(0 23px 54px rgba(0, 0, 0, 0.34));
+  position: absolute;
+  z-index: 82;
+  top: 200px;
+  left: 1240px;
+  box-sizing: border-box;
+  width: 324px;
+  min-width: 324px;
+  max-width: 324px;
+  height: 518px;
+  min-height: 518px;
+  max-height: 518px;
+  aspect-ratio: 5 / 8;
+  border: 0;
+  background: transparent;
+  filter: var(--page-local-filter);
+  padding: 0;
+  pointer-events: none;
+  transform: translate3d(0, 0, 300px) rotateY(-40deg) rotateX(1deg);
+  transform-origin: 50% 100%;
+  transform-style: flat;
+  transition: transform 360ms cubic-bezier(0.18, 0.78, 0.2, 1);
+  animation: discoveryCardIn 360ms 90ms both;
+}
+
+.discoveryDetailGlassAnchor {
+  position: absolute;
+  z-index: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.discoveryDetailGlassAnchorTopLeft {
+  top: 2.3148148148%;
+  left: 9.537037037%;
+}
+
+.discoveryDetailGlassAnchorTopRight {
+  top: 2.3148148148%;
+  left: 91.1111111111%;
+}
+
+.discoveryDetailGlassAnchorBottomRight {
+  top: 97.6851851852%;
+  left: 91.1111111111%;
+}
+
+.discoveryDetailGlassAnchorBottomLeft {
+  top: 97.6851851852%;
+  left: 9.537037037%;
+}
+
+.discoveryDetailBackdrop,
+.discoveryDetailChrome {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.discoveryDetailBackdrop {
+  z-index: 0;
+  background:
+    linear-gradient(180deg, rgba(34, 42, 58, 0.22), rgba(7, 10, 16, 0.2)),
+    rgba(13, 18, 27, 0.14);
+  mask: url('/aurora/detail-panel-alpha.png') center / 100% 100% no-repeat;
+  -webkit-mask: url('/aurora/detail-panel-alpha.png') center / 100% 100% no-repeat;
+}
+
+.discoveryDetailChrome {
+  z-index: 1;
+  object-fit: contain;
+  filter:
+    drop-shadow(0 0 12px rgba(142, 184, 255, 0.1))
+    var(--asset-ui-tint-filter);
+}
+
+.discoveryDetailContent {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  flex-direction: column;
+  padding: 36px 42px 31px;
+  pointer-events: auto;
+}
+
+.discoveryIndexBadge {
+  box-sizing: border-box;
+  border: 1px solid var(--discovery-ui-border);
+  border-radius: 5px;
+  background: var(--discovery-ui-control-surface);
+  color: var(--discovery-ui-chip-text);
+  font-size: 7.5px;
+  font-style: normal;
+  line-height: 18px;
+  padding: 0 5px;
+  white-space: nowrap;
+}
+
+.discoveryIndexBadge[data-status='not-created'] {
+  border-color: var(--discovery-ui-border);
+  color: var(--discovery-ui-text-soft);
+}
+
+.discoveryIndexBadge[data-status='building'] {
+  border-color: rgba(180, 207, 250, 0.44);
+  background: var(--discovery-ui-accent-surface);
+  box-shadow: 0 0 12px rgba(102, 151, 232, 0.14);
+  color: rgba(169, 204, 255, 0.9);
+}
+
+.discoveryIndexBadge[data-status='ready'] {
+  border-color: var(--discovery-ui-border);
+  background: var(--glass-chip-tint);
+  color: var(--discovery-ui-accent);
+}
+
+.discoveryDetailTabs {
+  display: flex;
+  height: 38px;
+  flex: 0 0 38px;
+  align-items: center;
+  gap: 18px;
+  border-bottom: 1px solid var(--discovery-ui-border);
+}
+
+.discoveryDetailTabs button {
+  position: relative;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: rgba(206, 217, 235, 0.38);
+  cursor: pointer;
+  font-size: 9.5px;
+  padding: 0;
+}
+
+.discoveryDetailTabs button[aria-selected='true'] {
+  color: var(--discovery-ui-text-strong);
+}
+
+.discoveryDetailTabs button[aria-selected='true']::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  border-radius: 99px;
+  background: rgba(185, 212, 255, 0.98);
+  box-shadow: 0 0 8px rgba(176, 186, 208, 0.38);
+  content: '';
+}
+
+.discoveryDetailTabBody {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.discoveryDetailInfo {
+  box-sizing: border-box;
+  height: 100%;
+  overflow: hidden;
+}
+
+.discoveryMetadata {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0 0;
+}
+
+.discoveryMetadata > div {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 12px;
+}
+
+.discoveryMetadata dt,
+.discoveryMetadata dd {
+  min-width: 0;
+  margin: 0;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.discoveryMetadata dt {
+  color: var(--discovery-ui-text-soft);
+}
+
+.discoveryMetadata dd {
+  display: block;
+  width: 100%;
+  max-width: 164px;
+  justify-self: end;
+  overflow: hidden;
+  color: var(--discovery-ui-text);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discoveryMetadata dd[data-source='local'],
+.discoveryMetadata dd[data-source='emby'],
+.discoveryMetadata dd[data-source='nas'] {
+  justify-self: end;
+  width: auto;
+  border: 1px solid var(--discovery-ui-border);
+  border-radius: 5px;
+  background: var(--glass-chip-tint);
+  color: var(--discovery-ui-chip-text);
+  line-height: 17px;
+  padding: 0 5px;
+}
+
+.discoveryMediaMetadata {
+  gap: 7px;
+  margin-top: 16px;
+}
+
+.discoveryMediaMetadata > div {
+  grid-template-columns: 64px minmax(0, 1fr);
+}
+
+.discoveryMediaMetadata dt,
+.discoveryMediaMetadata dd {
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.discoveryMetadataTagSection {
+  margin-top: 16px;
+  border-top: 1px solid var(--discovery-ui-border);
+  padding-top: 12px;
+}
+
+.discoveryMetadataTagSection h2 {
+  margin: 0 0 8px;
+  color: var(--discovery-ui-chip-text);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.discoveryMetadataTagSection > div {
+  display: flex;
+  width: 100%;
+  max-width: 210px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px 6px;
+}
+
+.discoveryMetadataTagSection span,
+.discoveryMetadataTagSection button {
+  box-sizing: border-box;
+  border: 1px solid var(--discovery-ui-border);
+  border-radius: 6px;
+  background: var(--glass-chip-tint);
+  color: var(--discovery-ui-chip-text);
+  font-size: 8.5px;
+  line-height: 1;
+  padding: 5px 7px;
+  white-space: nowrap;
+}
+
+.discoveryMetadataTagSection button {
+  display: grid;
+  width: 23px;
+  height: 21px;
+  place-items: center;
+  color: var(--discovery-ui-accent-muted);
+  cursor: pointer;
+  padding: 0;
+}
+
+.discoverySourceMetadata {
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.discoveryRelatedPlaceholder {
+  display: grid;
+  height: 100%;
+  place-content: center;
+  gap: 6px;
+  color: var(--discovery-ui-text-soft);
+  text-align: center;
+}
+
+.discoveryRelatedPlaceholder strong {
+  color: var(--discovery-ui-text);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.discoveryRelatedPlaceholder span {
+  font-size: 8px;
+}
+
+.discoveryIndexSummary {
+  display: flex;
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  padding-top: 9px;
+}
+
+.discoveryIndexLead {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--discovery-ui-border);
+  padding-bottom: 7px;
+}
+
+.discoveryIndexLead strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--discovery-ui-text);
+  font-size: 10px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discoveryIndexLead > span:not(.discoveryIndexBadge) {
+  color: var(--discovery-ui-text-soft);
+  font-size: 7.5px;
+  white-space: nowrap;
+}
+
+.discoveryIndexMetrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  margin: 8px 0 0;
+}
+
+.discoveryIndexMetrics > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  border: 1px solid var(--discovery-ui-border);
+  border-radius: 7px;
+  background: rgba(105, 133, 177, 0.05);
+  padding: 5px 7px;
+}
+
+.discoveryIndexMetrics dt,
+.discoveryIndexMetrics dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.discoveryIndexMetrics dt {
+  overflow: hidden;
+  color: var(--discovery-ui-text-soft);
+  font-size: 7.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discoveryIndexMetrics dd {
+  color: var(--discovery-ui-text);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.discoveryIndexNote {
+  margin: 7px 0 0;
+  color: var(--discovery-ui-text-soft);
+  font-size: 7.5px;
+  line-height: 1.45;
+}
+
+.discoveryOperationStatus {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.discoveryDetailActions {
+  display: grid;
+  height: 60px;
+  flex: 0 0 60px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  margin-top: 7px;
+}
+
+.discoveryDetailActions button {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid var(--discovery-ui-border);
+  border-radius: 8px;
+  background: rgba(105, 133, 177, 0.045);
+  color: rgba(211, 222, 239, 0.5);
+  cursor: pointer;
+  font-size: 8.5px;
+  padding: 0 4px;
+  transition: border-color 180ms ease, background-color 180ms ease, color 180ms ease;
+  white-space: nowrap;
+}
+
+.discoveryDetailActions[data-action-layout='single'],
+.discoveryDetailActions[data-action-layout='double'] {
+  grid-template-rows: calc((100% - 4px) / 2);
+  align-content: center;
+}
+
+.discoveryDetailActions[data-action-layout='single'] button {
+  width: calc((100% - 4px) / 2);
+  grid-column: 1 / -1;
+  justify-self: center;
+}
+
+.discoveryDetailActions[data-action-layout='triple'] button:last-child {
+  width: calc((100% - 4px) / 2);
+  grid-column: 1 / -1;
+  justify-self: center;
+}
+
+.discoveryDetailActions button:hover:not(:disabled) {
+  border-color: rgba(172, 205, 255, 0.34);
+  background: rgba(126, 164, 224, 0.08);
+  color: rgba(235, 242, 253, 0.84);
+}
+
+.discoveryDetailActions button.primary {
+  border-color: var(--discovery-ui-accent-border);
+  background: linear-gradient(
+    180deg,
+    rgba(93, 133, 199, 0.2),
+    rgba(48, 78, 129, 0.12)
+  );
+  box-shadow: none;
+  color: rgba(211, 227, 251, 0.86);
+}
+
+.discoveryDetailActions button.isComplete,
+.discoveryDetailActions button:disabled {
+  color: var(--discovery-ui-accent);
+  cursor: default;
+  opacity: 0.82;
+}
+
+.discoveryDetailEmpty {
+  display: grid;
+  flex: 1;
+  place-items: center;
+  color: var(--discovery-ui-text-soft);
+  font-size: 11px;
+}
+
+.auroraApp .discoveryFooter {
+  position: absolute;
+  z-index: 14;
+  bottom: 28px;
+  left: 440px;
+  display: flex;
+  box-sizing: border-box;
+  width: 620px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: rgba(211, 216, 226, 0.54);
+  font-size: calc(12px * 0.938114);
+  font-weight: 400;
+  padding: 0;
+  pointer-events: none;
+  text-shadow: none;
+  animation: discoveryCardIn 320ms 160ms both;
+}
+
+.discoveryFooter > div {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.discoveryFooter strong {
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+.discoveryFooter > span:last-child {
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discoverySearchCluster :is(button, input, select):focus-visible,
+.discoveryView :is(button, input, select):focus-visible {
+  outline: 0;
+  outline-offset: 0;
+  box-shadow: none;
+}
+
+@keyframes discoveryCardMaterialSwitch {
+  from {
+    filter:
+      brightness(var(--discovery-card-material-from-brightness))
+      saturate(var(--discovery-card-material-from-saturation));
+  }
+
+  to {
+    filter:
+      brightness(var(--discovery-card-material-to-brightness))
+      saturate(var(--discovery-card-material-to-saturation));
+  }
+}
+
+@keyframes discoveryCardSwitchInner {
+  0% {
+    transform:
+      translate3d(
+        0,
+        var(--discovery-card-selection-start-lift-y),
+        0
+      )
+      rotateY(var(--discovery-card-selection-start-rotate-y))
+      rotateZ(var(--discovery-card-selection-start-rotate-z))
+      scale(var(--discovery-card-selection-start-scale));
+  }
+
+  100% {
+    transform:
+      translate3d(0, 0, 0)
+      rotateY(0deg)
+      rotateZ(0deg)
+      scale(1);
+  }
+}
+
+@keyframes discoveryCardIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes discoverySpin {
+  to {
+    rotate: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .discoveryResultCard,
+  .discoveryResultMotion,
+  .discoveryResultVisual,
+  .discoveryCameraRig,
+  .discoverySearchCluster,
+  .discoverySearchBar,
+  .discoveryFilterRow,
+  .discoverySearchHint,
+  .discoverySearchSubmit,
+  .discoveryResultCards,
+  .discoveryDetailPanel,
+  .discoveryDetailProjectedGlass,
+  .discoveryFooter {
+    animation: none;
+    transition-duration: 0.01ms;
+  }
+
+  .discoverySearchSubmit:disabled svg {
+    animation: none;
+  }
+}
