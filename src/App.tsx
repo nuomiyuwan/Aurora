@@ -6,6 +6,7 @@ import type {
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
 } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Check,
   Box,
@@ -33,6 +34,7 @@ import {
   X,
 } from 'lucide-react'
 import { WindowsWindowControls } from './features/window-controls/WindowsWindowControls'
+import { AppUpdatePrompt } from './features/app-update/AppUpdatePrompt'
 import {
   DEFAULT_ACTIVE_PROJECT_ID,
   getDefaultProjectDescription,
@@ -57,6 +59,7 @@ import {
 } from './data/libraryPersistence'
 import type {
   FrameAnnotation as StoredFrameAnnotation,
+  FrameExclusion,
   MediaAsset,
   MediaIndexTask,
   MediaVisualIndex,
@@ -95,6 +98,7 @@ import {
 } from './features/discovery/DiscoveryView'
 import { createLocalDiscoveryResults } from './features/discovery/createLocalDiscoveryResults'
 import { createOnlineDiscoveryResults } from './features/discovery/createOnlineDiscoveryResults'
+import { createAiVisualSearchCandidates } from './features/discovery/aiVisualSearchCandidates'
 import type {
   DiscoveryFootageResult,
   DiscoveryModelResult,
@@ -111,6 +115,14 @@ import {
   type FrameRingExportResult,
   type FrameRingStillExportRequest,
 } from './features/frame-ring/FrameRingView'
+import {
+  createFrameRingAnnotationSuggestion,
+  type FrameRingAnnotationSuggestion,
+  type FrameRingSmartApplyRequest,
+  type FrameRingSmartApplyResult,
+  type FrameRingSmartScanResult,
+  type FrameRingSmartSensitivity,
+} from './features/frame-ring/frameRingSmartOrganize'
 import { resolveFrameRingLayout } from './features/frame-ring/frameRingLayout'
 import type { FrameRingEntryIntent } from './features/frame-ring/frameRingEntryIntent'
 import {
@@ -146,6 +158,12 @@ import {
   VideoLibraryReflectionCanvas,
   type ClipReflectionSource,
 } from './features/video-library/VideoLibraryReflectionCanvas'
+import {
+  resolveVideoClipHoverFrameIndex,
+  resolveVideoClipHoverProgress,
+  resolveVideoClipHoverTime,
+  shouldHandleVideoClipHoverPointer,
+} from './features/video-library/videoClipHoverScrub'
 import {
   ModelLibraryView,
   type ModelImportState,
@@ -404,6 +422,31 @@ type VideoClip = {
   online?: OnlineMediaDescriptor
 }
 
+type ClipHoverScrubVideoPortal = {
+  clipId: string
+  sourceUrl: string
+  poster: string
+  target: HTMLElement
+}
+
+type ClipHoverScrubSession = {
+  clipId: string
+  mode: 'frames' | 'video'
+  image: HTMLElement
+  hitTarget: HTMLElement
+  progress: number
+  sourceUrl: string | null
+  lastFrameIndex: number
+  frameLoadVersion: number
+}
+
+type PendingClipHoverScrub = {
+  clip: VideoClip
+  clientX: number
+  clientY: number
+  hitTarget: HTMLElement
+}
+
 type ExternalVideoAddCandidate = {
   descriptor: ExternalVideoFileDescriptor
   asset: MediaAsset
@@ -430,6 +473,15 @@ type FrameRingFocusTarget = {
   timeSeconds: number
   requestId: number
   intent: FrameRingEntryIntent
+}
+
+type FrameRingSmartUndoSnapshot = {
+  assetId: string
+  clipId: string
+  sourceFingerprint: string
+  visualIndexCreatedAt: string
+  annotations: StoredFrameAnnotation[]
+  exclusions: FrameExclusion[]
 }
 
 const AI_SEARCH_MAX_CANDIDATES = 2_000
@@ -826,6 +878,7 @@ const createEmptyOnlineSearchAssets = (): Record<
   tencent: [],
   xinpianchang: [],
   youku: [],
+  douyin: [],
 })
 
 const createOnlineSearchRequestState = (): Record<
@@ -836,6 +889,7 @@ const createOnlineSearchRequestState = (): Record<
   tencent: { sequence: 0, query: '' },
   xinpianchang: { sequence: 0, query: '' },
   youku: { sequence: 0, query: '' },
+  douyin: { sequence: 0, query: '' },
 })
 
 function createOnlineMediaAsset(
@@ -1441,6 +1495,20 @@ function StageBackgroundMedia({
   )
 }
 
+const INITIAL_APP_UPDATE_STATE: AppUpdateState = {
+  currentVersion: __AURORA_VERSION__,
+  supported: false,
+  status: 'unsupported',
+  latestVersion: null,
+  releaseName: null,
+  releaseNotes: [],
+  releaseDate: null,
+  progress: null,
+  checkedAt: null,
+  source: null,
+  error: null,
+}
+
 function App() {
   const defaultActiveIndex = initialProjects.findIndex(
     (project) => project.id === DEFAULT_ACTIVE_PROJECT_ID,
@@ -1455,6 +1523,7 @@ function App() {
   const [frameAnnotations, setFrameAnnotations] = useState<
     StoredFrameAnnotation[]
   >([])
+  const [frameExclusions, setFrameExclusions] = useState<FrameExclusion[]>([])
   const [indexProgressByAsset, setIndexProgressByAsset] = useState<
     Record<string, number>
   >({})
@@ -1583,6 +1652,8 @@ function App() {
   const [isClipDragging, setIsClipDragging] = useState(false)
   const [isClipReleasing, setIsClipReleasing] = useState(false)
   const [hoveredClipId, setHoveredClipId] = useState<string | null>(null)
+  const [clipHoverScrubVideoPortal, setClipHoverScrubVideoPortal] =
+    useState<ClipHoverScrubVideoPortal | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [newProjectName, setNewProjectName] = useState('新边界计划')
@@ -1614,6 +1685,10 @@ function App() {
   const [settingsPanelOpen, setSettingsPanelOpen] = useState(false)
   const [settingsPanelMode, setSettingsPanelMode] =
     useState<SettingsPanelMode>('visual')
+  const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>(
+    INITIAL_APP_UPDATE_STATE,
+  )
+  const [appUpdatePromptOpen, setAppUpdatePromptOpen] = useState(false)
   const [accountCenterOpen, setAccountCenterOpen] = useState(false)
   const [aiSearchMode, setAiSearchMode] = useState(false)
   const [aiServiceProfilesState, setAiServiceProfilesState] =
@@ -1683,6 +1758,7 @@ function App() {
   const latestOnlineProviderSettingsRef = useRef(
     serializeOnlineProviderSettings(onlineProviderEnabled),
   )
+  const frameRingSmartUndoRef = useRef<FrameRingSmartUndoSnapshot | null>(null)
   const modelObjectUrlsRef = useRef(new Map<string, string>())
   const reflectionSurfaceRequestVersionsRef = useRef(createReflectionRequestVersions())
   const reflectionSurfaceAbortControllersRef = useRef<
@@ -1701,12 +1777,85 @@ function App() {
   const mediaAssetsRef = useRef(mediaAssets)
   const modelAssetsRef = useRef(modelAssets)
   const projectAssetRefsRef = useRef(projectAssetRefs)
+  const visualIndexesRef = useRef(visualIndexes)
+  const frameAnnotationsRef = useRef(frameAnnotations)
+  const frameExclusionsRef = useRef(frameExclusions)
   projectsRef.current = projects
   mediaAssetsRef.current = mediaAssets
   modelAssetsRef.current = modelAssets
   projectAssetRefsRef.current = projectAssetRefs
+  visualIndexesRef.current = visualIndexes
+  frameAnnotationsRef.current = frameAnnotations
+  frameExclusionsRef.current = frameExclusions
   onlineSearchAssetsByProviderRef.current = onlineSearchAssetsByProvider
   onlineProviderEnabledRef.current = onlineProviderEnabled
+
+  const saveLatestStateSync = useCallback(() => {
+    const bridge = window.desktopBridge
+    if (!bridge?.saveAppDataSync) return
+    const library = latestLibraryPersistenceRef.current
+    const appearance = latestAppearancePersistenceRef.current
+    const onlineProviders = latestOnlineProviderSettingsRef.current
+    const data: Record<string, unknown> = {}
+    if (library) data.library = library
+    if (appearance) data.appearance = appearance
+    if (onlineProviders) data.onlineProviders = onlineProviders
+    if (Object.keys(data).length === 0) return
+    bridge.saveAppDataSync(data)
+  }, [])
+
+  useEffect(() => {
+    const bridge = window.desktopBridge
+    if (
+      typeof bridge?.getAppUpdateState !== 'function' ||
+      typeof bridge?.onAppUpdateStateChange !== 'function'
+    ) {
+      return
+    }
+    let active = true
+    const applyState = (state: AppUpdateState) => {
+      if (!active || !state || typeof state.currentVersion !== 'string') return
+      setAppUpdateState(state)
+    }
+    void bridge.getAppUpdateState().then(applyState).catch(() => undefined)
+    const dispose = bridge.onAppUpdateStateChange(applyState)
+    return () => {
+      active = false
+      dispose()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (startupGateActive) return
+    if (
+      appUpdateState.status === 'available' ||
+      appUpdateState.status === 'downloading' ||
+      appUpdateState.status === 'downloaded' ||
+      appUpdateState.status === 'installing'
+    ) {
+      setAppUpdatePromptOpen(true)
+    }
+  }, [appUpdateState.status, appUpdateState.latestVersion, startupGateActive])
+
+  const handleCheckForUpdates = useCallback(() => {
+    if (appUpdateState.status === 'available') {
+      setAppUpdatePromptOpen(true)
+      return
+    }
+    const bridge = window.desktopBridge
+    if (typeof bridge?.checkForAppUpdate !== 'function') return
+    void bridge.checkForAppUpdate().then(setAppUpdateState).catch(() => undefined)
+  }, [appUpdateState.status])
+
+  const handleInstallAppUpdate = useCallback(() => {
+    const bridge = window.desktopBridge
+    if (typeof bridge?.downloadAndInstallAppUpdate !== 'function') return
+    saveLatestStateSync()
+    void bridge
+      .downloadAndInstallAppUpdate()
+      .then(setAppUpdateState)
+      .catch(() => undefined)
+  }, [saveLatestStateSync])
 
   useEffect(() => {
     const bridge = window.desktopBridge
@@ -2058,6 +2207,7 @@ function App() {
         )
         setVisualIndexes(library.visualIndexes)
         setFrameAnnotations(library.frameAnnotations)
+        setFrameExclusions(library.frameExclusions)
         setProjectCustomizations(restoredProjectCustomizations)
         setSelectedProjectId(library.selectedProjectId)
         setSelectedClipId(restoredClipId)
@@ -2179,6 +2329,11 @@ function App() {
                     annotation.assetId !== recoveredAsset.id,
                 ),
               )
+              setFrameExclusions((current) =>
+                current.filter(
+                  (exclusion) => exclusion.assetId !== recoveredAsset.id,
+                ),
+              )
             }
           }
         }
@@ -2234,6 +2389,7 @@ function App() {
       projectAssetRefs,
       visualIndexes,
       frameAnnotations,
+      frameExclusions,
       modelAssets,
       projectTitles,
       projectCovers,
@@ -2271,6 +2427,7 @@ function App() {
     mediaAssets,
     modelAssets,
     frameAnnotations,
+    frameExclusions,
     projectAssetRefs,
     projectCustomizations,
     projects,
@@ -2368,20 +2525,9 @@ function App() {
   useEffect(() => {
     const bridge = window.desktopBridge
     if (!bridge?.saveAppDataSync) return
-    const saveLatestState = () => {
-      const library = latestLibraryPersistenceRef.current
-      const appearance = latestAppearancePersistenceRef.current
-      const onlineProviders = latestOnlineProviderSettingsRef.current
-      const data: Record<string, unknown> = {}
-      if (library) data.library = library
-      if (appearance) data.appearance = appearance
-      if (onlineProviders) data.onlineProviders = onlineProviders
-      if (Object.keys(data).length === 0) return
-      bridge.saveAppDataSync?.(data)
-    }
-    window.addEventListener('beforeunload', saveLatestState)
-    return () => window.removeEventListener('beforeunload', saveLatestState)
-  }, [])
+    window.addEventListener('beforeunload', saveLatestStateSync)
+    return () => window.removeEventListener('beforeunload', saveLatestStateSync)
+  }, [saveLatestStateSync])
 
   useEffect(() => {
     const bridge = window.desktopBridge
@@ -2579,6 +2725,11 @@ function App() {
   const pendingClipOverscroll = useRef(0)
   const clipGridRef = useRef<HTMLDivElement>(null)
   const clipHitLayerRef = useRef<HTMLDivElement>(null)
+  const clipHoverScrubSessionRef = useRef<ClipHoverScrubSession | null>(null)
+  const pendingClipHoverScrubRef = useRef<PendingClipHoverScrub | null>(null)
+  const clipHoverScrubRafRef = useRef<number | undefined>(undefined)
+  const clipHoverScrubVideoRef = useRef<HTMLVideoElement>(null)
+  const loadedClipHoverFramesRef = useRef(new Set<string>())
   const clipGlassLayerRef = useRef<HTMLDivElement>(null)
   const modelGlassLayerRef = useRef<HTMLDivElement>(null)
   const videoLibraryToolbarRef = useRef<HTMLDivElement>(null)
@@ -2704,6 +2855,13 @@ function App() {
   )
   const videoClips = useMemo(() => {
     const assetsById = new Map(mediaAssets.map((asset) => [asset.id, asset]))
+    const excludedFrameIdsBySource = new Map<string, Set<string>>()
+    frameExclusions.forEach((exclusion) => {
+      const sourceKey = `${exclusion.assetId}\u0000${exclusion.sourceFingerprint}`
+      const excludedFrameIds = excludedFrameIdsBySource.get(sourceKey) ?? new Set()
+      excludedFrameIds.add(exclusion.frameId)
+      excludedFrameIdsBySource.set(sourceKey, excludedFrameIds)
+    })
     const indexesByAssetId = new Map(
       visualIndexes.map((index) => [index.assetId, index]),
     )
@@ -2726,7 +2884,11 @@ function App() {
         previewPlayback.sourcePath === asset.sourcePath
           ? previewPlayback.playbackPath
           : null
+      const excludedFrameIds = excludedFrameIdsBySource.get(
+        `${asset.id}\u0000${asset.sourceFingerprint}`,
+      )
       const indexedFrames = (visualIndex?.frames ?? []).flatMap((frame) => {
+        if (excludedFrameIds?.has(frame.id)) return []
         const thumbnail = resolveLibraryMediaUrl(frame.imagePath)
         return thumbnail
           ? [{
@@ -2738,7 +2900,17 @@ function App() {
             }]
           : []
       })
-      const indexedPoster = resolveLibraryMediaUrl(visualIndex?.posterPath)
+      const posterWasExcluded = Boolean(
+        visualIndex?.frames.some(
+          (frame) =>
+            frame.imagePath === visualIndex.posterPath &&
+            excludedFrameIds?.has(frame.id),
+        ),
+      )
+      const visiblePosterPath = posterWasExcluded
+        ? indexedFrames[Math.floor(indexedFrames.length / 2)]?.imagePath ?? null
+        : visualIndex?.posterPath ?? null
+      const indexedPoster = resolveLibraryMediaUrl(visiblePosterPath)
       const effectiveSampleCount = asset.sourcePath
         ? indexedFrames.length
         : asset.sampleCount
@@ -2801,6 +2973,7 @@ function App() {
     })
   }, [
     displayProjects,
+    frameExclusions,
     mediaAssets,
     previewPlaybackByAsset,
     projectAssetRefs,
@@ -3410,6 +3583,8 @@ function App() {
               rating: annotation.rating,
               tags: annotation.tags,
               note: annotation.note,
+              tagsSource: annotation.tagsSource,
+              noteSource: annotation.noteSource,
             },
           ]),
       ),
@@ -3893,44 +4068,87 @@ function App() {
     [aiDiscoveryFrameResults],
   )
   const aiVisualFrameCandidates = useMemo(() => {
+    return createAiVisualSearchCandidates({
+      clips: videoClips,
+      assets: libraryMediaAssets,
+      projects: displayProjects,
+    })
+  }, [displayProjects, libraryMediaAssets, videoClips])
+  const aiDiscoveryVisualResultsById = useMemo(() => {
+    const results = new Map(aiDiscoveryFrameResultsById)
+    const localClipResultsById = new Map(
+      localDiscoveryResults.flatMap((result) =>
+        result.detailType === 'footage' &&
+        result.source === 'local' &&
+        result.kind === 'clip'
+          ? [[result.id, result] as const]
+          : [],
+      ),
+    )
+    const clipsById = new Map(videoClips.map((clip) => [clip.id, clip]))
+
+    aiVisualFrameCandidates.forEach((candidate) => {
+      if (candidate.analysisTier !== 'thumbnail') return
+      const clipResult = localClipResultsById.get(
+        `local:clip:${candidate.clipId}`,
+      )
+      const clip = clipsById.get(candidate.clipId)
+      if (!clipResult || !clip) return
+      const previewProgress = clip.durationSeconds && clip.durationSeconds > 0
+        ? Math.min(
+            100,
+            Math.max(0, candidate.timeSeconds / clip.durationSeconds * 100),
+          )
+        : 0
+      results.set(candidate.resultId, {
+        ...clipResult,
+        id: candidate.resultId,
+        kind: 'frame',
+        thumbnail:
+          resolveLibraryMediaUrl(candidate.imagePath) || clipResult.thumbnail,
+        previewProgress,
+        footage: {
+          ...clipResult.footage,
+          auroraTimeSeconds: candidate.timeSeconds,
+        },
+      })
+    })
+    return results
+  }, [
+    aiDiscoveryFrameResultsById,
+    aiVisualFrameCandidates,
+    localDiscoveryResults,
+    videoClips,
+  ])
+  const aiDiscoveryCoverage = useMemo(() => {
     const localAssetIds = new Set(
       libraryMediaAssets.map((asset) => asset.id),
     )
-    const projectsById = new Map(
-      displayProjects.map((project) => [project.id, project]),
+    const totalAssetIds = new Set(
+      videoClips
+        .filter((clip) => localAssetIds.has(clip.assetId))
+        .map((clip) => clip.assetId),
     )
-    const seenFrames = new Set<string>()
-
-    return videoClips.flatMap((clip) => {
-      if (!localAssetIds.has(clip.assetId) || !clip.sourceFingerprint) return []
-      const project = projectsById.get(clip.projectId)
-      if (!project || (project.kind ?? 'video') !== 'video') return []
-
-      return clip.indexedFrames.flatMap((frame) => {
-        const semanticFrameKey = [
-          clip.assetId,
-          clip.sourceFingerprint,
-          frame.id,
-        ].join(':')
-        if (!frame.imagePath || seenFrames.has(semanticFrameKey)) return []
-        seenFrames.add(semanticFrameKey)
-        return [{
-          resultId: `local:frame:${clip.id}:${frame.id}`,
-          assetId: clip.assetId,
-          clipId: clip.id,
-          projectId: clip.projectId,
-          frameId: frame.id,
-          sourceFingerprint: clip.sourceFingerprint,
-          imagePath: frame.imagePath,
-          timeSeconds: frame.timeSeconds,
-          filename: clip.filename,
-          projectTitle: project.title,
-          tags: clip.tags,
-          note: clip.note,
-        } satisfies AiVisualFrameCandidate]
-      })
+    const thumbnailAssetIds = new Set<string>()
+    const visualIndexAssetIds = new Set<string>()
+    aiVisualFrameCandidates.forEach((candidate) => {
+      if (candidate.analysisTier === 'thumbnail') {
+        thumbnailAssetIds.add(candidate.assetId)
+      } else {
+        visualIndexAssetIds.add(candidate.assetId)
+      }
     })
-  }, [displayProjects, libraryMediaAssets, videoClips])
+    const searchableAssetIds = new Set([
+      ...thumbnailAssetIds,
+      ...visualIndexAssetIds,
+    ])
+    return {
+      totalLocalVideos: totalAssetIds.size,
+      searchableLocalVideos: searchableAssetIds.size,
+      thumbnailVideos: thumbnailAssetIds.size,
+      visualIndexVideos: visualIndexAssetIds.size,
+    }
+  }, [aiVisualFrameCandidates, libraryMediaAssets, videoClips])
   const libraryStorageLabel = useMemo(() => {
     let knownBytes = 0
     let unknownCount = 0
@@ -4231,7 +4449,253 @@ function App() {
     clipReleaseRaf.current = window.requestAnimationFrame(animate)
   }
 
+  function clearClipHoverScrub(expectedClipId?: string) {
+    const pending = pendingClipHoverScrubRef.current
+    if (!expectedClipId || pending?.clip.id === expectedClipId) {
+      pendingClipHoverScrubRef.current = null
+      if (clipHoverScrubRafRef.current !== undefined) {
+        window.cancelAnimationFrame(clipHoverScrubRafRef.current)
+        clipHoverScrubRafRef.current = undefined
+      }
+    }
+
+    const session = clipHoverScrubSessionRef.current
+    if (!session || (expectedClipId && session.clipId !== expectedClipId)) {
+      return
+    }
+
+    session.image.style.removeProperty('--clip-preview-cover')
+    session.image.removeAttribute('data-hover-scrubbing')
+    session.hitTarget.removeAttribute('data-hover-scrubbing')
+    const video = clipHoverScrubVideoRef.current
+    if (video) {
+      video.pause()
+      video.removeAttribute('data-frame-ready')
+    }
+    clipHoverScrubSessionRef.current = null
+    setClipHoverScrubVideoPortal((current) =>
+      current?.clipId === session.clipId ? null : current,
+    )
+  }
+
+  function findClipHoverScrubImage(clipId: string) {
+    const card = Array.from(
+      clipGridRef.current?.querySelectorAll<HTMLElement>('.videoClipCard') ?? [],
+    ).find((candidate) => candidate.dataset.clipId === clipId)
+    return card?.querySelector<HTMLElement>('.videoClipImage') ?? null
+  }
+
+  function preloadClipHoverFrame(url: string) {
+    if (!url || loadedClipHoverFramesRef.current.has(url)) return
+    const loader = new window.Image()
+    loader.decoding = 'async'
+    loader.onload = () => loadedClipHoverFramesRef.current.add(url)
+    loader.src = url
+  }
+
+  function applyIndexedClipHoverFrame(
+    clip: VideoClip,
+    session: ClipHoverScrubSession,
+    progress: number,
+  ) {
+    const frameIndex = resolveVideoClipHoverFrameIndex(
+      progress,
+      clip.indexedFrames.map((frame) => frame.timeSeconds),
+      clip.durationSeconds,
+    )
+    if (frameIndex === null || session.lastFrameIndex === frameIndex) return
+    const frame = clip.indexedFrames[frameIndex]
+    if (!frame?.thumbnail) return
+
+    session.lastFrameIndex = frameIndex
+    session.frameLoadVersion += 1
+    const requestVersion = session.frameLoadVersion
+    const applyFrame = () => {
+      const current = clipHoverScrubSessionRef.current
+      if (
+        current !== session ||
+        current.mode !== 'frames' ||
+        current.frameLoadVersion !== requestVersion ||
+        current.lastFrameIndex !== frameIndex
+      ) {
+        return
+      }
+      current.image.style.setProperty(
+        '--clip-preview-cover',
+        toCssImageValue(frame.thumbnail),
+      )
+    }
+
+    if (loadedClipHoverFramesRef.current.has(frame.thumbnail)) {
+      applyFrame()
+    } else {
+      const loader = new window.Image()
+      loader.decoding = 'async'
+      loader.onload = () => {
+        loadedClipHoverFramesRef.current.add(frame.thumbnail)
+        applyFrame()
+      }
+      loader.src = frame.thumbnail
+    }
+
+    const previousFrame = clip.indexedFrames[frameIndex - 1]
+    const nextFrame = clip.indexedFrames[frameIndex + 1]
+    if (previousFrame?.thumbnail) preloadClipHoverFrame(previousFrame.thumbnail)
+    if (nextFrame?.thumbnail) preloadClipHoverFrame(nextFrame.thumbnail)
+  }
+
+  function seekClipHoverScrubVideo(video = clipHoverScrubVideoRef.current) {
+    const session = clipHoverScrubSessionRef.current
+    if (!session || session.mode !== 'video' || !video || video.readyState < 1) {
+      return
+    }
+    if (video.dataset.clipId !== session.clipId) return
+
+    const duration =
+      Number.isFinite(video.duration) && video.duration > 0
+        ? video.duration
+        : null
+    if (duration === null) return
+    const rawTarget = resolveVideoClipHoverTime(session.progress, duration)
+    if (rawTarget === null) return
+    const endGuard = Math.min(0.04, duration * 0.02)
+    const targetTime = Math.min(rawTarget, Math.max(0, duration - endGuard))
+    if (Math.abs(video.currentTime - targetTime) < 0.04) return
+    try {
+      video.currentTime = targetTime
+    } catch {
+      // A later pointer sample or loadedmetadata event will retry quietly.
+    }
+  }
+
+  function flushClipHoverScrub() {
+    clipHoverScrubRafRef.current = undefined
+    const pending = pendingClipHoverScrubRef.current
+    pendingClipHoverScrubRef.current = null
+    if (!pending || !pending.hitTarget.isConnected) return
+
+    const image = findClipHoverScrubImage(pending.clip.id)
+    if (!image) {
+      clearClipHoverScrub(pending.clip.id)
+      return
+    }
+    const progress = resolveVideoClipHoverProgress(
+      pending.clientX,
+      pending.clientY,
+      image.getBoundingClientRect(),
+    )
+    if (progress === null) {
+      clearClipHoverScrub(pending.clip.id)
+      return
+    }
+
+    const useIndexedFrames = pending.clip.indexedFrames.length > 1
+    const useVideoFallback = Boolean(pending.clip.sourceUrl)
+    if (!useIndexedFrames && !useVideoFallback) {
+      clearClipHoverScrub(pending.clip.id)
+      return
+    }
+
+    const nextMode = useIndexedFrames ? 'frames' : 'video'
+    let session = clipHoverScrubSessionRef.current
+    if (
+      !session ||
+      session.clipId !== pending.clip.id ||
+      session.mode !== nextMode ||
+      session.image !== image ||
+      (nextMode === 'video' && session.sourceUrl !== pending.clip.sourceUrl)
+    ) {
+      clearClipHoverScrub()
+      session = {
+        clipId: pending.clip.id,
+        mode: nextMode,
+        image,
+        hitTarget: pending.hitTarget,
+        progress,
+        sourceUrl: pending.clip.sourceUrl,
+        lastFrameIndex: -1,
+        frameLoadVersion: 0,
+      }
+      clipHoverScrubSessionRef.current = session
+      image.dataset.hoverScrubbing = nextMode
+      pending.hitTarget.dataset.hoverScrubbing = nextMode
+      if (nextMode === 'video' && pending.clip.sourceUrl) {
+        setClipHoverScrubVideoPortal({
+          clipId: pending.clip.id,
+          sourceUrl: pending.clip.sourceUrl,
+          poster: pending.clip.thumbnail,
+          target: image,
+        })
+      }
+    }
+
+    session.progress = progress
+    if (session.mode === 'frames') {
+      applyIndexedClipHoverFrame(pending.clip, session, progress)
+    } else {
+      seekClipHoverScrubVideo()
+    }
+  }
+
+  function handleClipHoverScrubPointerMove(
+    event: ReactPointerEvent<HTMLElement>,
+    clip: VideoClip,
+  ) {
+    if (
+      clip.online ||
+      !shouldHandleVideoClipHoverPointer({
+        pointerType: event.pointerType,
+        buttons: event.buttons,
+      }) ||
+      clipDragState.current.active ||
+      clipWheelDragRef.current.active ||
+      isClipDragging ||
+      isClipReleasing ||
+      isCameraDragging
+    ) {
+      clearClipHoverScrub(clip.id)
+      return
+    }
+
+    pendingClipHoverScrubRef.current = {
+      clip,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      hitTarget: event.currentTarget,
+    }
+    if (clipHoverScrubRafRef.current === undefined) {
+      clipHoverScrubRafRef.current = window.requestAnimationFrame(
+        flushClipHoverScrub,
+      )
+    }
+  }
+
+  function markClipHoverScrubVideoReady(video: HTMLVideoElement) {
+    const session = clipHoverScrubSessionRef.current
+    if (
+      session?.mode === 'video' &&
+      session.clipId === video.dataset.clipId
+    ) {
+      video.dataset.frameReady = 'true'
+    }
+  }
+
+  function handleClipHoverScrubVideoError(
+    clipId: string,
+    sourceUrl: string,
+  ) {
+    const session = clipHoverScrubSessionRef.current
+    if (
+      session?.clipId !== clipId ||
+      session.sourceUrl !== sourceUrl
+    ) {
+      return
+    }
+    clearClipHoverScrub(clipId)
+  }
+
   function handleClipStagePointerDown(event: ReactPointerEvent<HTMLElement>) {
+    clearClipHoverScrub()
     if (event.button !== 0 || filteredProjectClips.length <= 1) return
 
     const pointerTarget = event.target as HTMLElement
@@ -4310,6 +4774,7 @@ function App() {
       setIsClipDragging(true)
       setIsClipReleasing(false)
       setHoveredClipId(null)
+      clearClipHoverScrub()
       suppressNextClipClick.current = true
     } else if (sample.moves) {
       const elapsed = Math.max(1, now - wheelState.lastTime)
@@ -5011,7 +5476,12 @@ function App() {
     setIsClipDragging(false)
     setIsClipReleasing(false)
     suppressNextClipClick.current = false
+    clearClipHoverScrub()
   }, [clipFilters, query, selectedProject.id])
+
+  useEffect(() => {
+    if (currentView !== 'video-library') clearClipHoverScrub()
+  }, [currentView])
 
   useLayoutEffect(() => {
     const glassLayer = clipGlassLayerRef.current
@@ -5845,7 +6315,7 @@ function App() {
     }
 
     const filteredCandidates = aiVisualFrameCandidates.filter((candidate) => {
-      const result = aiDiscoveryFrameResultsById.get(candidate.resultId)
+      const result = aiDiscoveryVisualResultsById.get(candidate.resultId)
       return Boolean(
         result &&
           (request.resolution === 'all' ||
@@ -5891,7 +6361,7 @@ function App() {
       : coarseResponse
 
     const matchedFrames = searchResponse.matches.flatMap((match) => {
-      const result = aiDiscoveryFrameResultsById.get(match.resultId)
+      const result = aiDiscoveryVisualResultsById.get(match.resultId)
       if (!result) return []
       return [{
         ...result,
@@ -6466,6 +6936,11 @@ function App() {
             !changedAssetIds.has(annotation.assetId),
         ),
       )
+      setFrameExclusions((current) =>
+        current.filter(
+          (exclusion) => !changedAssetIds.has(exclusion.assetId),
+        ),
+      )
       setProjectAssetRefs((current) =>
         current.map((reference) =>
           changedAssetIds.has(reference.assetId)
@@ -6606,6 +7081,11 @@ function App() {
                 current.filter(
                   (annotation) =>
                     annotation.assetId !== importedAsset.id,
+                ),
+              )
+              setFrameExclusions((current) =>
+                current.filter(
+                  (exclusion) => exclusion.assetId !== importedAsset.id,
                 ),
               )
             }
@@ -7542,6 +8022,11 @@ function App() {
           (annotation) => annotation.assetId !== candidate.asset.id,
         ),
       )
+      setFrameExclusions((current) =>
+        current.filter(
+          (exclusion) => exclusion.assetId !== candidate.asset.id,
+        ),
+      )
     }
     if (candidate.asset.thumbnail) {
       setProjectAssetRefs((current) =>
@@ -8117,6 +8602,15 @@ function App() {
         ...current.filter((index) => index.assetId !== clip.assetId),
         nextIndex,
       ])
+      if (
+        rebuild ||
+        nextIndex.sourceFingerprint !== clip.sourceFingerprint
+      ) {
+        frameRingSmartUndoRef.current = null
+        setFrameExclusions((current) =>
+          current.filter((exclusion) => exclusion.assetId !== clip.assetId),
+        )
+      }
       setMediaAssets((current) =>
         current.map((asset) => {
           if (asset.id !== clip.assetId) return asset
@@ -8173,6 +8667,17 @@ function App() {
     annotation: FrameRingAnnotation,
   ) {
     if (!selectedClip) return
+    const currentAnnotations = frameAnnotationsRef.current
+    const existing = currentAnnotations.find(
+      (entry) =>
+        entry.assetId === selectedClip.assetId && entry.frameId === frameId,
+    )
+    const previousTags = existing?.tags ?? selectedClip.tags.slice(0, 8)
+    const previousNote = existing?.note ?? selectedClip.note
+    const tagsChanged =
+      annotation.tags.length !== previousTags.length ||
+      annotation.tags.some((tag, index) => tag !== previousTags[index])
+    const noteChanged = annotation.note !== previousNote
     const nextAnnotation: StoredFrameAnnotation = {
       assetId: selectedClip.assetId,
       frameId,
@@ -8180,15 +8685,349 @@ function App() {
       rating: annotation.rating,
       tags: annotation.tags,
       note: annotation.note,
+      tagsSource: tagsChanged
+        ? 'manual'
+        : existing
+          ? existing.tagsSource ?? 'manual'
+          : 'ai',
+      noteSource: noteChanged
+        ? 'manual'
+        : existing
+          ? existing.noteSource ?? 'manual'
+          : 'ai',
     }
-    setFrameAnnotations((current) => [
-      ...current.filter(
+    const nextAnnotations = [
+      ...currentAnnotations.filter(
         (entry) =>
           entry.assetId !== nextAnnotation.assetId ||
           entry.frameId !== frameId,
       ),
       nextAnnotation,
-    ])
+    ]
+    frameAnnotationsRef.current = nextAnnotations
+    setFrameAnnotations(nextAnnotations)
+  }
+
+  function captureSelectedFrameSmartTarget() {
+    if (!selectedClip?.sourcePath || selectedClip.online) return null
+    const asset = mediaAssetsRef.current.find(
+      (entry) => entry.id === selectedClip.assetId,
+    )
+    const visualIndex = visualIndexesRef.current.find(
+      (entry) => entry.assetId === selectedClip.assetId,
+    )
+    if (
+      !asset ||
+      asset.sourceFingerprint !== selectedClip.sourceFingerprint ||
+      !visualIndex ||
+      visualIndex.sourceFingerprint !== selectedClip.sourceFingerprint
+    ) {
+      return null
+    }
+    return {
+      assetId: selectedClip.assetId,
+      clipId: selectedClip.id,
+      projectId: selectedClip.projectId,
+      projectTitle:
+        displayProjects.find((project) => project.id === selectedClip.projectId)
+          ?.title ?? '',
+      filename: selectedClip.filename,
+      sourceFingerprint: selectedClip.sourceFingerprint,
+      visualIndexCreatedAt: visualIndex.createdAt,
+      visualIndex,
+      frames: selectedClip.indexedFrames,
+      inheritedTags: selectedClip.tags.slice(0, 8),
+      inheritedNote: selectedClip.note,
+    }
+  }
+
+  function selectedFrameSmartTargetIsCurrent(target: {
+    assetId: string
+    clipId: string
+    sourceFingerprint: string
+    visualIndexCreatedAt: string
+  }) {
+    const asset = mediaAssetsRef.current.find(
+      (entry) => entry.id === target.assetId,
+    )
+    const visualIndex = visualIndexesRef.current.find(
+      (entry) => entry.assetId === target.assetId,
+    )
+    return Boolean(
+      selectedClip?.id === target.clipId &&
+        asset &&
+        asset.sourceFingerprint === target.sourceFingerprint &&
+        visualIndex &&
+        visualIndex.sourceFingerprint === target.sourceFingerprint &&
+        visualIndex.createdAt === target.visualIndexCreatedAt,
+    )
+  }
+
+  async function scanSelectedFramesForSmartOrganize(
+    sensitivity: FrameRingSmartSensitivity,
+  ): Promise<FrameRingSmartScanResult> {
+    const bridge = window.desktopBridge
+    const target = captureSelectedFrameSmartTarget()
+    if (!bridge?.analyzeFrameQuality || !target || target.frames.length === 0) {
+      throw new Error('当前素材还没有可分析的帧环')
+    }
+
+    const response = await bridge.analyzeFrameQuality({
+      sensitivity,
+      frames: target.frames.map((frame) => ({
+        frameId: frame.id,
+        imagePath: frame.imagePath,
+        timeSeconds: frame.timeSeconds,
+      })),
+    })
+    if (!selectedFrameSmartTargetIsCurrent(target)) {
+      throw new Error('分析期间素材已变化，请重新扫描')
+    }
+
+    const validFrameIds = new Set(target.frames.map((frame) => frame.id))
+    return {
+      version: response.version,
+      blankCandidates: response.blankCandidates.flatMap((candidate) =>
+        validFrameIds.has(candidate.frameId)
+          ? [{
+              frameId: candidate.frameId,
+              kind: candidate.kind,
+              confidence: candidate.confidence,
+              reason: candidate.reason,
+            }]
+          : [],
+      ),
+      duplicateGroups: response.duplicateGroups.flatMap((group) => {
+        const removeFrameIds = group.removeFrameIds.filter((frameId) =>
+          validFrameIds.has(frameId),
+        )
+        if (!validFrameIds.has(group.keepFrameId) || removeFrameIds.length === 0) {
+          return []
+        }
+        return [{
+          id: group.groupId,
+          keepFrameId: group.keepFrameId,
+          removeFrameIds,
+          reason: group.reason,
+          confidence: group.confidence,
+        }]
+      }),
+    }
+  }
+
+  async function analyzeSelectedFramesForSmartOrganize(
+    frameIds: readonly string[],
+  ): Promise<FrameRingAnnotationSuggestion[]> {
+    const bridge = window.desktopBridge
+    const target = captureSelectedFrameSmartTarget()
+    const visionProfileId = aiServiceProfilesState.activeVisionProfileId
+    if (!bridge?.analyzeAiVisualFrames || !target) {
+      throw new Error('AI 画面理解仅可在 Aurora 桌面版中使用')
+    }
+    if (!visionProfileId) {
+      throw new Error('请先在探索页设置中选择画面理解模型')
+    }
+
+    const requestedFrameIds = new Set(frameIds)
+    const requestedFrames = target.frames.filter((frame) =>
+      requestedFrameIds.has(frame.id),
+    )
+    if (requestedFrames.length === 0) return []
+
+    const response = await bridge.analyzeAiVisualFrames({
+      visionProfileId,
+      candidates: requestedFrames.map((frame) => ({
+        resultId: `frame-smart:${target.assetId}:${target.sourceFingerprint}:${frame.id}`,
+        assetId: target.assetId,
+        clipId: target.clipId,
+        projectId: target.projectId,
+        frameId: frame.id,
+        sourceFingerprint: target.sourceFingerprint,
+        imagePath: frame.imagePath,
+        timeSeconds: frame.timeSeconds,
+        filename: target.filename,
+        projectTitle: target.projectTitle,
+        tags: target.inheritedTags,
+        note: target.inheritedNote,
+        analysisTier: 'visual-index',
+      })),
+    })
+    if (!response.ok) throw new Error(response.error.message)
+    if (!selectedFrameSmartTargetIsCurrent(target)) {
+      throw new Error('理解画面期间素材已变化，请重新扫描')
+    }
+
+    return response.data.frames.flatMap((suggestion) =>
+      requestedFrameIds.has(suggestion.frameId)
+        ? [createFrameRingAnnotationSuggestion({
+            frameId: suggestion.frameId,
+            descriptionZh: suggestion.descriptionZh,
+            keywordsZh: suggestion.keywordsZh,
+          })]
+        : [],
+    )
+  }
+
+  function applySelectedFrameSmartOrganize(
+    request: FrameRingSmartApplyRequest,
+  ): FrameRingSmartApplyResult {
+    const target = captureSelectedFrameSmartTarget()
+    if (!target || !selectedFrameSmartTargetIsCurrent(target)) {
+      throw new Error('素材已变化，请重新扫描后再应用')
+    }
+
+    const validFrameIds = new Set(
+      target.visualIndex.frames.map((frame) => frame.id),
+    )
+    const currentExclusions = frameExclusionsRef.current
+    const currentAnnotations = frameAnnotationsRef.current
+    const exclusionKeys = new Set(
+      currentExclusions
+        .filter(
+          (exclusion) =>
+            exclusion.assetId === target.assetId &&
+            exclusion.sourceFingerprint === target.sourceFingerprint,
+        )
+        .map((exclusion) => exclusion.frameId),
+    )
+    const now = new Date().toISOString()
+    let excludedCount = 0
+    let nextExclusions = [...currentExclusions]
+    request.exclusions.forEach((exclusion) => {
+      if (!validFrameIds.has(exclusion.frameId)) return
+      const duplicateOfFrameId =
+        exclusion.reason === 'duplicate' &&
+        exclusion.duplicateOfFrameId !== exclusion.frameId &&
+        exclusion.duplicateOfFrameId !== null &&
+        validFrameIds.has(exclusion.duplicateOfFrameId)
+          ? exclusion.duplicateOfFrameId
+          : null
+      if (!exclusionKeys.has(exclusion.frameId)) excludedCount += 1
+      exclusionKeys.add(exclusion.frameId)
+      nextExclusions = nextExclusions.filter(
+        (entry) =>
+          entry.assetId !== target.assetId ||
+          entry.sourceFingerprint !== target.sourceFingerprint ||
+          entry.frameId !== exclusion.frameId,
+      )
+      nextExclusions.push({
+        assetId: target.assetId,
+        sourceFingerprint: target.sourceFingerprint,
+        frameId: exclusion.frameId,
+        reason: exclusion.reason,
+        duplicateOfFrameId,
+        createdAt: now,
+      })
+    })
+
+    const annotationsByFrameId = new Map(
+      currentAnnotations
+        .filter((annotation) => annotation.assetId === target.assetId)
+        .map((annotation) => [annotation.frameId, annotation]),
+    )
+    let annotatedCount = 0
+    request.annotations.forEach((suggestion) => {
+      if (
+        !validFrameIds.has(suggestion.frameId) ||
+        exclusionKeys.has(suggestion.frameId)
+      ) {
+        return
+      }
+      const existing = annotationsByFrameId.get(suggestion.frameId)
+      const protectTags = Boolean(
+        existing && (existing.tagsSource ?? 'manual') === 'manual',
+      )
+      const protectNote = Boolean(
+        existing && (existing.noteSource ?? 'manual') === 'manual',
+      )
+      const generatedTags = suggestion.tags
+        .map((tag) => tag.trim())
+        .filter(Boolean)
+        .slice(0, 10)
+      const generatedNote = Array.from(suggestion.note.trim())
+        .slice(0, 20)
+        .join('')
+      const nextAnnotation: StoredFrameAnnotation = {
+        assetId: target.assetId,
+        frameId: suggestion.frameId,
+        favorite: existing?.favorite ?? false,
+        rating: existing?.rating ?? 0,
+        tags: protectTags
+          ? existing?.tags ?? target.inheritedTags
+          : generatedTags.length > 0
+            ? generatedTags
+            : existing?.tags ?? target.inheritedTags,
+        note: protectNote
+          ? existing?.note ?? target.inheritedNote
+          : generatedNote || existing?.note || target.inheritedNote,
+        tagsSource: protectTags ? 'manual' : 'ai',
+        noteSource: protectNote ? 'manual' : 'ai',
+      }
+      const changed =
+        !existing ||
+        nextAnnotation.favorite !== existing.favorite ||
+        nextAnnotation.rating !== existing.rating ||
+        nextAnnotation.note !== existing.note ||
+        nextAnnotation.tagsSource !== (existing.tagsSource ?? 'manual') ||
+        nextAnnotation.noteSource !== (existing.noteSource ?? 'manual') ||
+        nextAnnotation.tags.length !== existing.tags.length ||
+        nextAnnotation.tags.some((tag, index) => tag !== existing.tags[index])
+      if (changed) {
+        annotatedCount += 1
+        annotationsByFrameId.set(suggestion.frameId, nextAnnotation)
+      }
+    })
+
+    const nextAnnotations = [
+      ...currentAnnotations.filter(
+        (annotation) => annotation.assetId !== target.assetId,
+      ),
+      ...annotationsByFrameId.values(),
+    ]
+    if (excludedCount === 0 && annotatedCount === 0) {
+      return { excludedCount: 0, annotatedCount: 0 }
+    }
+
+    frameRingSmartUndoRef.current = {
+      assetId: target.assetId,
+      clipId: target.clipId,
+      sourceFingerprint: target.sourceFingerprint,
+      visualIndexCreatedAt: target.visualIndexCreatedAt,
+      annotations: currentAnnotations.filter(
+        (annotation) => annotation.assetId === target.assetId,
+      ),
+      exclusions: currentExclusions.filter(
+        (exclusion) => exclusion.assetId === target.assetId,
+      ),
+    }
+    frameExclusionsRef.current = nextExclusions
+    frameAnnotationsRef.current = nextAnnotations
+    setFrameExclusions(nextExclusions)
+    setFrameAnnotations(nextAnnotations)
+    return { excludedCount, annotatedCount }
+  }
+
+  function undoSelectedFrameSmartOrganize() {
+    const snapshot = frameRingSmartUndoRef.current
+    if (!snapshot || !selectedFrameSmartTargetIsCurrent(snapshot)) return false
+    const nextExclusions = [
+      ...frameExclusionsRef.current.filter(
+        (exclusion) => exclusion.assetId !== snapshot.assetId,
+      ),
+      ...snapshot.exclusions,
+    ]
+    const nextAnnotations = [
+      ...frameAnnotationsRef.current.filter(
+        (annotation) => annotation.assetId !== snapshot.assetId,
+      ),
+      ...snapshot.annotations,
+    ]
+    frameRingSmartUndoRef.current = null
+    frameExclusionsRef.current = nextExclusions
+    frameAnnotationsRef.current = nextAnnotations
+    setFrameExclusions(nextExclusions)
+    setFrameAnnotations(nextAnnotations)
+    return true
   }
 
   async function revealSelectedFrameSource(sourcePath: string) {
@@ -8197,52 +9036,36 @@ function App() {
 
   async function deleteSelectedIndexFrame(frameId: string) {
     if (!selectedClip) return false
-    const visualIndex = visualIndexes.find(
+    const visualIndex = visualIndexesRef.current.find(
       (index) => index.assetId === selectedClip.assetId,
     )
-    if (!visualIndex) return false
-    const remainingFrames = visualIndex.frames.filter(
-      (frame) => frame.id !== frameId,
-    )
-    if (remainingFrames.length === visualIndex.frames.length) return false
+    if (
+      !visualIndex ||
+      visualIndex.sourceFingerprint !== selectedClip.sourceFingerprint ||
+      !selectedClip.indexedFrames.some((frame) => frame.id === frameId)
+    ) return false
 
-    const nextPoster =
-      remainingFrames[Math.floor(remainingFrames.length / 2)]?.imagePath ?? null
-    setVisualIndexes((current) =>
-      remainingFrames.length === 0
-        ? current.filter((index) => index.assetId !== selectedClip.assetId)
-        : current.map((index) =>
-            index.assetId === selectedClip.assetId
-              ? {
-                  ...index,
-                  posterPath: nextPoster ?? index.posterPath,
-                  frames: remainingFrames,
-                }
-              : index,
-          ),
-    )
-    setMediaAssets((current) =>
-      current.map((asset) =>
-        asset.id === selectedClip.assetId
-          ? {
-              ...asset,
-              thumbnail: nextPoster,
-              sampleCount: remainingFrames.length,
-              indexTask: 'idle',
-              indexError: null,
-            }
-          : asset,
+    const nextExclusions = [
+      ...frameExclusionsRef.current.filter(
+        (exclusion) =>
+          exclusion.assetId !== selectedClip.assetId ||
+          exclusion.sourceFingerprint !== selectedClip.sourceFingerprint ||
+          exclusion.frameId !== frameId,
       ),
-    )
-    setFrameAnnotations((current) =>
-      current.filter(
-        (annotation) =>
-          annotation.assetId !== selectedClip.assetId ||
-          annotation.frameId !== frameId,
-      ),
-    )
+      {
+        assetId: selectedClip.assetId,
+        sourceFingerprint: selectedClip.sourceFingerprint,
+        frameId,
+        reason: 'manual' as const,
+        duplicateOfFrameId: null,
+        createdAt: new Date().toISOString(),
+      },
+    ]
+    frameRingSmartUndoRef.current = null
+    frameExclusionsRef.current = nextExclusions
+    setFrameExclusions(nextExclusions)
 
-    if (remainingFrames.length === 0) {
+    if (selectedClip.indexedFrames.length <= 1) {
       showClipActionNotice('最后一帧已移除，需要重新建立视觉索引。')
       transitionToView('video-library')
     }
@@ -8420,6 +9243,11 @@ function App() {
         current.filter(
           (annotation) =>
             annotation.assetId !== registeredAsset.id,
+        ),
+      )
+      setFrameExclusions((current) =>
+        current.filter(
+          (exclusion) => exclusion.assetId !== registeredAsset.id,
         ),
       )
     }
@@ -8797,6 +9625,7 @@ function App() {
     query: searchQuery,
     page,
     limit,
+    searchType,
   }: DiscoveryOnlineSearchRequest): Promise<DiscoveryOnlineSearchPage> {
     if (!onlineProviderEnabled[provider]) {
       throw new Error(`${getOnlineProviderLabel(provider)}来源尚未启用`)
@@ -8821,6 +9650,7 @@ function App() {
       query: searchQuery,
       page,
       limit,
+      ...(searchType ? { searchType } : {}),
     }
     const response = bridge?.searchOnlineProvider
       ? await bridge.searchOnlineProvider({
@@ -8828,9 +9658,24 @@ function App() {
           ...legacyRequest,
         })
       : provider === 'bilibili' && bridge?.searchBilibiliVideos
-        ? await bridge.searchBilibiliVideos(legacyRequest)
+        ? await bridge.searchBilibiliVideos({
+            query: searchQuery,
+            page,
+            limit,
+            ...(searchType === 'all' ||
+            searchType === 'video' ||
+            searchType === 'bangumi' ||
+            searchType === 'film' ||
+            searchType === 'live'
+              ? { searchType }
+              : {}),
+          })
         : provider === 'tencent' && bridge?.searchTencentVideos
-          ? await bridge.searchTencentVideos(legacyRequest)
+          ? await bridge.searchTencentVideos({
+              query: searchQuery,
+              page,
+              limit,
+            })
           : null
     if (!response) {
       throw new Error(
@@ -9821,6 +10666,8 @@ function App() {
           particleImportState={particleImportState}
           onChooseParticleMedia={() => particleFileInputRef.current?.click()}
           onRemoveCustomParticleMedia={removeCustomParticleMedia}
+          appUpdateState={appUpdateState}
+          onCheckForUpdates={handleCheckForUpdates}
           onChange={updateCurrentPageSettings}
           onParticlesChange={updateCurrentPageParticles}
         />
@@ -10324,6 +11171,40 @@ function App() {
                 }),
               )}
             </div>
+            {clipHoverScrubVideoPortal?.target.isConnected &&
+              createPortal(
+                <video
+                  key={`${clipHoverScrubVideoPortal.clipId}:${clipHoverScrubVideoPortal.sourceUrl}`}
+                  ref={clipHoverScrubVideoRef}
+                  className="videoClipHoverScrubVideo"
+                  data-clip-id={clipHoverScrubVideoPortal.clipId}
+                  src={clipHoverScrubVideoPortal.sourceUrl}
+                  poster={clipHoverScrubVideoPortal.poster}
+                  muted
+                  playsInline
+                  preload="metadata"
+                  disablePictureInPicture
+                  aria-hidden="true"
+                  onLoadedMetadata={(event) =>
+                    seekClipHoverScrubVideo(event.currentTarget)
+                  }
+                  onLoadedData={(event) => {
+                    seekClipHoverScrubVideo(event.currentTarget)
+                    markClipHoverScrubVideoReady(event.currentTarget)
+                  }}
+                  onSeeked={(event) =>
+                    markClipHoverScrubVideoReady(event.currentTarget)
+                  }
+                  onError={() =>
+                    handleClipHoverScrubVideoError(
+                      clipHoverScrubVideoPortal.clipId,
+                      clipHoverScrubVideoPortal.sourceUrl,
+                    )
+                  }
+                />,
+                clipHoverScrubVideoPortal.target,
+                `clip-hover-scrub:${clipHoverScrubVideoPortal.clipId}`,
+              )}
             <div
               ref={clipHitLayerRef}
               className="videoClipHitLayer"
@@ -10353,13 +11234,22 @@ function App() {
                       tabIndex={interactionHidden ? -1 : 0}
                       aria-label={`查看 ${clip.filename}`}
                       onPointerEnter={() => setHoveredClipId(clip.id)}
-                      onPointerLeave={() =>
-                        setHoveredClipId((current) => (current === clip.id ? null : current))
+                      onPointerMove={(event) =>
+                        handleClipHoverScrubPointerMove(event, clip)
                       }
+                      onPointerLeave={() => {
+                        clearClipHoverScrub(clip.id)
+                        setHoveredClipId((current) =>
+                          current === clip.id ? null : current,
+                        )
+                      }}
                       onFocus={() => setHoveredClipId(clip.id)}
-                      onBlur={() =>
-                        setHoveredClipId((current) => (current === clip.id ? null : current))
-                      }
+                      onBlur={() => {
+                        clearClipHoverScrub(clip.id)
+                        setHoveredClipId((current) =>
+                          current === clip.id ? null : current,
+                        )
+                      }}
                       onClick={() => handleClipSelect(clip.id)}
                       onDoubleClick={() => openFrameRing(clip.id)}
                     />,
@@ -10633,8 +11523,8 @@ function App() {
                           ],
                           ['视频 ID', detailClip.online.mediaId],
                           ['UP 主', detailClip.online.author],
-                          ['本地文件', '不下载'],
-                          ['帧环', '不建立'],
+                          ['本地文件', '暂不可用'],
+                          ['帧环', '暂不可用'],
                         ]
                       : [
                           ['时长', detailClip.duration],
@@ -10718,7 +11608,7 @@ function App() {
                       </strong>
                       <small>
                         {detailClip.online
-                          ? `由${getOnlineProviderLabel(detailClip.online.provider)}官方页面播放，不下载、不建立帧环`
+                          ? '暂不可用'
                           : detailClip.sampleCount > 0
                           ? detailClip.indexTask === 'building'
                             ? `正在重新建立 · ${Math.round((detailIndexProgress ?? 0) * 100)}%`
@@ -10857,6 +11747,28 @@ function App() {
           onDeleteFrame={
             onlineFrameRingClip ? undefined : deleteSelectedIndexFrame
           }
+          onScanSmartFrames={
+            externalFrameRingClip || onlineFrameRingClip
+              ? undefined
+              : scanSelectedFramesForSmartOrganize
+          }
+          onAnalyzeSmartFrames={
+            externalFrameRingClip ||
+            onlineFrameRingClip ||
+            !aiServiceProfilesState.activeVisionProfileId
+              ? undefined
+              : analyzeSelectedFramesForSmartOrganize
+          }
+          onApplySmartOrganize={
+            externalFrameRingClip || onlineFrameRingClip
+              ? undefined
+              : applySelectedFrameSmartOrganize
+          }
+          onUndoSmartOrganize={
+            externalFrameRingClip || onlineFrameRingClip
+              ? undefined
+              : undoSelectedFrameSmartOrganize
+          }
           indexTask={frameRingClip.indexTask}
           indexProgress={indexProgressByAsset[frameRingClip.assetId]}
           onBuildFrameRing={
@@ -10940,6 +11852,7 @@ function App() {
         onAiSearchModeChange={setAiSearchMode}
         onAiSearchSetupRequired={openAiSearchSettings}
         onAiSearch={searchAiDiscovery}
+        aiCoverage={aiDiscoveryCoverage}
       />
 
       {projectMenu && menuProject && menuBaseProject && (
@@ -12042,6 +12955,12 @@ function App() {
         onWarmupViewChange={setCurrentView}
         onEntryStart={handleStartupEntryStart}
         onEntered={handleStartupEntered}
+      />
+      <AppUpdatePrompt
+        open={appUpdatePromptOpen}
+        state={appUpdateState}
+        onClose={() => setAppUpdatePromptOpen(false)}
+        onUpdate={handleInstallAppUpdate}
       />
     </main>
   )

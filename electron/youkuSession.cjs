@@ -21,6 +21,15 @@ const OFFICIAL_REQUEST_TIMEOUT_MS = 8_000
 const OFFICIAL_SEARCH_MAX_ATTEMPTS = 2
 const OFFICIAL_SEARCH_RETRY_DELAY_MS = 350
 const OFFICIAL_SEARCH_IDLE_MS = 30_000
+const OFFICIAL_VERIFICATION_TIMEOUT_MS = 5 * 60 * 1_000
+const OFFICIAL_VERIFICATION_POLL_MS = 450
+const MAX_EMBEDDED_FRAME_EDGE = 480
+const MAX_EMBEDDED_FRAME_SOURCE_EDGE = 16_384
+const MAX_EMBEDDED_FRAME_SOURCE_PIXELS = 100_000_000
+const MAX_EMBEDDED_FRAME_DATA_URL_LENGTH = 3 * 1024 * 1024
+const EMBEDDED_FRAME_READY_TIMEOUT_MS = 1_500
+const EMBEDDED_FRAME_CAPTURE_TIMEOUT_MS = 2_500
+const EMBEDDED_WEB_FULLSCREEN_RETRY_DELAYS_MS = [0, 250, 500, 1_000, 2_000, 4_000]
 const COVER_FETCH_ATTEMPTS = 3
 const COVER_FETCH_TIMEOUT_MS = 3_000
 const IMAGE_CONTENT_TYPES = new Map([
@@ -73,6 +82,111 @@ body:has(:is(#ykPlayer, #player, #playerBox, .youku-player, .ykplayer, .kplayer)
   margin: 0 !important;
   background: #03060a !important;
 }
+`
+
+const ENTER_YOUKU_WEB_FULLSCREEN_SCRIPT = `
+(() => {
+  /* aurora-youku-enter-web-fullscreen */
+  const officialPlayer = window.videoPlayer
+  if (
+    officialPlayer &&
+    typeof officialPlayer.getPlayerState === 'function' &&
+    typeof officialPlayer.webFullscreen === 'function'
+  ) {
+    try {
+      const state = officialPlayer.getPlayerState()
+      if (state?.webFullscreen === true) return 'already'
+      if (state?.webFullscreen === false) {
+        officialPlayer.webFullscreen(true)
+        return 'clicked'
+      }
+    } catch {
+      // Some Youku variants expose the global before its methods are ready.
+      // Fall through to the two reviewed official controls for those pages.
+    }
+  }
+
+  const player = document.querySelector(
+    '#ykPlayer, #player, #playerBox, .youku-player, .ykplayer, .kplayer'
+  )
+  if (!player) return 'not-ready'
+
+  const compact = (value) => String(value || '').replace(/\\s+/g, '').toLowerCase()
+  const valuesFor = (element) => [
+    element.getAttribute('aria-label'),
+    element.getAttribute('title'),
+    element.getAttribute('data-tip'),
+    element.getAttribute('data-title'),
+    element.getAttribute('data-tooltip'),
+    element.textContent,
+  ].map(compact).filter(Boolean)
+  const pageState = [document.documentElement, document.body, player]
+    .filter(Boolean)
+    .map((element) => compact(element.getAttribute('class')))
+    .join(' ')
+  const stateClassPattern = /(?:web|page)[_-]?full(?:screen)?(?:[_-]?(?:active|on))|(?:active|on)[_-]?(?:web|page)[_-]?full(?:screen)?/i
+  if (document.fullscreenElement || stateClassPattern.test(pageState)) {
+    return 'already'
+  }
+
+  // Youku maps these two official controls to player.webFullscreen().  Keep
+  // this allowlist exact: #fullscreen-icon and #fullscreen2-icon enter native
+  // HTML fullscreen and must never be triggered by Aurora.
+  const candidates = Array.from(player.querySelectorAll(
+    '#webfullscreen-icon, #webfullscreen2-icon'
+  ))
+
+  for (const candidate of candidates) {
+    const values = valuesFor(candidate)
+    if (values.some((value) => /退出(?:网页|页面)全屏/.test(value))) {
+      return 'already'
+    }
+    const control = candidate.closest('button, [role="button"]') || candidate
+    if (!player.contains(control) || control.getClientRects().length === 0) continue
+    if (typeof control.click !== 'function') continue
+    control.click()
+    return 'clicked'
+  }
+  return 'not-ready'
+})()
+`
+
+const READ_EMBEDDED_VIDEO_FRAME_READY_SCRIPT = `
+(() => new Promise((resolve) => {
+  const video = Array.from(document.querySelectorAll('video')).find(
+    (candidate) =>
+      candidate.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+      candidate.videoWidth > 0 &&
+      candidate.videoHeight > 0 &&
+      !candidate.seeking
+  )
+  if (!video) {
+    resolve(false)
+    return
+  }
+  let settled = false
+  const finish = () => {
+    if (settled) return
+    settled = true
+    resolve(
+      document.contains(video) &&
+      video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+      video.videoWidth > 0 &&
+      video.videoHeight > 0 &&
+      !video.seeking
+    )
+  }
+  const timeout = window.setTimeout(finish, 280)
+  const finishAfterPaint = () => {
+    window.clearTimeout(timeout)
+    window.requestAnimationFrame(() => window.requestAnimationFrame(finish))
+  }
+  if (typeof video.requestVideoFrameCallback === 'function') {
+    video.requestVideoFrameCallback(finishAfterPaint)
+  } else {
+    finishAfterPaint()
+  }
+}))()
 `
 
 function parseSecureUrl(value) {
@@ -283,6 +397,97 @@ function guardYoukuGuestWebContents(contents, lockedPage, expectedSession) {
   }
   let documentGeneration = 0
   let styledGeneration = -1
+  let webFullscreenCompletedGeneration = -1
+  let webFullscreenRetryIndex = 0
+  let webFullscreenRetryTimer = null
+  let webFullscreenAttemptToken = 0
+  let webFullscreenInFlight = false
+  let guestDestroyed = false
+  const clearWebFullscreenRetry = () => {
+    if (webFullscreenRetryTimer === null) return
+    clearTimeout(webFullscreenRetryTimer)
+    webFullscreenRetryTimer = null
+  }
+  const resetWebFullscreenAttempt = () => {
+    clearWebFullscreenRetry()
+    webFullscreenAttemptToken += 1
+    webFullscreenInFlight = false
+    webFullscreenCompletedGeneration = -1
+    webFullscreenRetryIndex = 0
+  }
+  const webFullscreenAttemptIsCurrent = (token, generation) => Boolean(
+    !guestDestroyed &&
+    token === webFullscreenAttemptToken &&
+    generation === documentGeneration &&
+    contents.isDestroyed?.() !== true &&
+    isPermitted(contents.getURL?.()),
+  )
+  function scheduleWebFullscreenAttempt() {
+    if (
+      guestDestroyed ||
+      contents.isDestroyed?.() === true ||
+      webFullscreenInFlight ||
+      webFullscreenRetryTimer !== null ||
+      webFullscreenCompletedGeneration === documentGeneration ||
+      webFullscreenRetryIndex >= EMBEDDED_WEB_FULLSCREEN_RETRY_DELAYS_MS.length ||
+      !isPermitted(contents.getURL?.())
+    ) return
+    const generation = documentGeneration
+    const delayMs = EMBEDDED_WEB_FULLSCREEN_RETRY_DELAYS_MS[
+      webFullscreenRetryIndex
+    ]
+    webFullscreenRetryIndex += 1
+    if (delayMs === 0) {
+      attemptWebFullscreen(generation)
+      return
+    }
+    webFullscreenRetryTimer = setTimeout(() => {
+      webFullscreenRetryTimer = null
+      if (generation === documentGeneration) attemptWebFullscreen(generation)
+    }, delayMs)
+  }
+  function attemptWebFullscreen(generation) {
+    if (
+      guestDestroyed ||
+      generation !== documentGeneration ||
+      webFullscreenInFlight ||
+      webFullscreenCompletedGeneration === generation ||
+      contents.isDestroyed?.() === true ||
+      typeof contents.executeJavaScript !== 'function' ||
+      !isPermitted(contents.getURL?.())
+    ) return
+    const token = webFullscreenAttemptToken + 1
+    webFullscreenAttemptToken = token
+    webFullscreenInFlight = true
+    let operation
+    try {
+      operation = contents.executeJavaScript(
+        ENTER_YOUKU_WEB_FULLSCREEN_SCRIPT,
+        true,
+      )
+    } catch {
+      webFullscreenInFlight = false
+      scheduleWebFullscreenAttempt()
+      return
+    }
+    void Promise.resolve(operation).then(
+      (result) => {
+        if (!webFullscreenAttemptIsCurrent(token, generation)) return
+        webFullscreenInFlight = false
+        if (result === 'clicked' || result === 'already') {
+          webFullscreenCompletedGeneration = generation
+          clearWebFullscreenRetry()
+          return
+        }
+        scheduleWebFullscreenAttempt()
+      },
+      () => {
+        if (!webFullscreenAttemptIsCurrent(token, generation)) return
+        webFullscreenInFlight = false
+        scheduleWebFullscreenAttempt()
+      },
+    )
+  }
   const applyCss = (force = false) => {
     if (
       typeof contents.insertCSS !== 'function' ||
@@ -303,20 +508,32 @@ function guardYoukuGuestWebContents(contents, lockedPage, expectedSession) {
     if (mainFrame !== false && !inPlace) {
       documentGeneration += 1
       styledGeneration = -1
+      resetWebFullscreenAttempt()
     }
   })
   contents.on('did-navigate', finishNavigation)
   contents.on('did-navigate-in-page', finishNavigation)
-  contents.on('dom-ready', () => applyCss(false))
-  contents.on('did-finish-load', () => applyCss(false))
-  contents.on('did-stop-loading', () => applyCss(false))
+  const handleDocumentReady = () => {
+    applyCss(false)
+    scheduleWebFullscreenAttempt()
+  }
+  contents.on('dom-ready', handleDocumentReady)
+  contents.on('did-finish-load', handleDocumentReady)
+  contents.on('did-stop-loading', handleDocumentReady)
   contents.on('leave-html-full-screen', () => {
     applyCss(true)
     contents.invalidate?.()
   })
+  contents.once?.('destroyed', () => {
+    guestDestroyed = true
+    clearWebFullscreenRetry()
+    webFullscreenAttemptToken += 1
+    webFullscreenInFlight = false
+  })
   contents.on('will-attach-webview', (event) => event.preventDefault())
   contents.setWindowOpenHandler?.(() => ({ action: 'deny' }))
   applyCss(true)
+  scheduleWebFullscreenAttempt()
   return true
 }
 
@@ -381,6 +598,134 @@ function installYoukuPlayerWebviewGuard(hostContents, expectedSession = null) {
   }
   YOUKU_EMBEDDED_GUESTS.set(hostContents, installation)
   return dispose
+}
+
+function normalizeEmbeddedFrameCaptureRequest(request) {
+  if (
+    !request ||
+    typeof request !== 'object' ||
+    Array.isArray(request) ||
+    Object.keys(request).sort().join(',') !== 'kind,mediaId' ||
+    typeof request.mediaId !== 'string'
+  ) return null
+
+  if (request.kind === 'video') {
+    const mediaId = normalizeVideoId(request.mediaId)
+    return mediaId ? { kind: 'video', mediaId } : null
+  }
+  if (request.kind === 'episode') {
+    const mediaId = normalizeShowId(request.mediaId)
+    return mediaId ? { kind: 'episode', mediaId } : null
+  }
+  return null
+}
+
+function settleEmbeddedFrameOperation(operation, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      resolve(null)
+    }, timeoutMs)
+    Promise.resolve(operation).then(
+      (value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(value)
+      },
+      () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(null)
+      },
+    )
+  })
+}
+
+function readEmbeddedFrameImageSize(image) {
+  const size = image?.getSize?.()
+  const width = size?.width
+  const height = size?.height
+  if (
+    !Number.isSafeInteger(width) ||
+    !Number.isSafeInteger(height) ||
+    width <= 0 ||
+    height <= 0 ||
+    width > MAX_EMBEDDED_FRAME_SOURCE_EDGE ||
+    height > MAX_EMBEDDED_FRAME_SOURCE_EDGE ||
+    width * height > MAX_EMBEDDED_FRAME_SOURCE_PIXELS
+  ) return null
+  return { width, height }
+}
+
+async function captureYoukuEmbeddedFrame(hostContents, request) {
+  const normalizedRequest = normalizeEmbeddedFrameCaptureRequest(request)
+  const installation = hostContents && typeof hostContents === 'object'
+    ? YOUKU_EMBEDDED_GUESTS.get(hostContents)
+    : null
+  const guest = installation?.activeGuest
+  const lockedPage = installation?.activeLockedPage
+  if (
+    !normalizedRequest ||
+    !installation ||
+    installation.disposed ||
+    !guest ||
+    guest.isDestroyed?.() === true ||
+    !lockedPage ||
+    lockedPage.kind !== normalizedRequest.kind ||
+    lockedPage.mediaId !== normalizedRequest.mediaId ||
+    typeof guest.executeJavaScript !== 'function' ||
+    typeof guest.capturePage !== 'function'
+  ) return null
+
+  try {
+    const ready = await settleEmbeddedFrameOperation(
+      guest.executeJavaScript(READ_EMBEDDED_VIDEO_FRAME_READY_SCRIPT, true),
+      EMBEDDED_FRAME_READY_TIMEOUT_MS,
+    )
+    if (
+      ready !== true ||
+      installation.activeGuest !== guest ||
+      guest.isDestroyed?.() === true
+    ) return null
+
+    let image = await settleEmbeddedFrameOperation(
+      guest.capturePage(),
+      EMBEDDED_FRAME_CAPTURE_TIMEOUT_MS,
+    )
+    if (
+      installation.activeGuest !== guest ||
+      guest.isDestroyed?.() === true ||
+      !image ||
+      image.isEmpty?.() !== false
+    ) return null
+
+    let size = readEmbeddedFrameImageSize(image)
+    if (!size) return null
+    if (Math.max(size.width, size.height) > MAX_EMBEDDED_FRAME_EDGE) {
+      image = image.resize?.(
+        size.width >= size.height
+          ? { width: MAX_EMBEDDED_FRAME_EDGE, quality: 'good' }
+          : { height: MAX_EMBEDDED_FRAME_EDGE, quality: 'good' },
+      )
+      if (!image || image.isEmpty?.() !== false) return null
+      size = readEmbeddedFrameImageSize(image)
+      if (!size || Math.max(size.width, size.height) > MAX_EMBEDDED_FRAME_EDGE) {
+        return null
+      }
+    }
+    const dataUrl = image.toDataURL?.()
+    return typeof dataUrl === 'string' &&
+      dataUrl.length <= MAX_EMBEDDED_FRAME_DATA_URL_LENGTH &&
+      /^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(dataUrl)
+      ? dataUrl
+      : null
+  } catch {
+    return null
+  }
 }
 
 function extractBalancedJson(source, startIndex) {
@@ -756,10 +1101,25 @@ function normalizeLimit(value) {
   return value
 }
 
+function normalizeYoukuSearchType(value) {
+  const searchType = value ?? 'all'
+  if (!['all', 'official', 'user'].includes(searchType)) {
+    throw new TypeError('Youku search type is invalid')
+  }
+  return searchType
+}
+
+function matchesYoukuSearchType(descriptor, searchType) {
+  if (searchType === 'all') return true
+  const isUserVideo = descriptor.tags.includes('用户视频')
+  return searchType === 'user' ? isUserVideo : !isUserVideo
+}
+
 function normalizeYoukuSearchPayload(payload, options = {}) {
   const query = boundedText(options.query, MAX_QUERY_LENGTH)
   const page = options.page === undefined ? 1 : options.page
   const limit = normalizeLimit(options.limit)
+  const searchType = normalizeYoukuSearchType(options.searchType)
   if (!query) throw new TypeError('Youku search query is invalid')
   if (!Number.isSafeInteger(page) || page < 1) {
     throw new TypeError('Youku search page is invalid')
@@ -788,7 +1148,9 @@ function normalizeYoukuSearchPayload(payload, options = {}) {
     seen.add(key)
     results.push(descriptor)
   })
-  const boundedResults = results.slice(0, limit)
+  const boundedResults = results
+    .filter((descriptor) => matchesYoukuSearchType(descriptor, searchType))
+    .slice(0, limit)
   const remoteTotal = Number(searchData?.total)
   const totalCount = Number.isFinite(remoteTotal)
     ? Math.max(boundedResults.length, Math.round(Math.max(0, remoteTotal)))
@@ -852,6 +1214,35 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
 
+const YOUKU_VERIFICATION_HELPER_SOURCE = String.raw`
+  const challengeSelectors = [
+    'iframe[src*="_____tmd_____/punish"]',
+    'iframe[src*="captcha"]',
+    '.baxia-dialog',
+    '.nc-container',
+    '.nc_wrapper',
+    '[id*="baxia"]',
+  ];
+  const challengeElementIsVisible = (element) => {
+    if (!(element instanceof Element) || element.getClientRects().length === 0) {
+      return false;
+    }
+    const style = getComputedStyle(element);
+    return style.display !== 'none'
+      && style.visibility !== 'hidden'
+      && Number(style.opacity || 1) > 0;
+  };
+  const verificationIsVisible = () => {
+    const challengeVisible = challengeSelectors.some((selector) =>
+      Array.from(document.querySelectorAll(selector)).some(challengeElementIsVisible)
+    );
+    if (challengeVisible) return true;
+    if (window._config_?.action !== 'captcha') return false;
+    const bodyText = String(document.body?.innerText || '');
+    return /验证码|完成验证|滑动验证|captcha|verify|访问过于频繁/i.test(bodyText);
+  };
+`
+
 function createYoukuOfficialPageSearchScript({ query, page, limit }) {
   const encodedRequest = Buffer.from(JSON.stringify({ query, page, limit }))
     .toString('base64')
@@ -860,10 +1251,7 @@ function createYoukuOfficialPageSearchScript({ query, page, limit }) {
   const request = JSON.parse(new TextDecoder().decode(
     Uint8Array.from(atob('${encodedRequest}'), (character) => character.charCodeAt(0)),
   ));
-  const verificationIsVisible = () => Boolean(
-    window._config_?.action === 'captcha' ||
-    document.querySelector('iframe[src*="_____tmd_____/punish"]')
-  );
+${YOUKU_VERIFICATION_HELPER_SOURCE}
   if (verificationIsVisible()) {
     return { verificationRequired: true };
   }
@@ -1007,12 +1395,25 @@ function createYoukuOfficialPageSearchScript({ query, page, limit }) {
   `.trim()
 }
 
+const READ_YOUKU_VERIFICATION_STATE_SCRIPT = `
+(() => {
+/* aurora-youku-verification-state */
+${YOUKU_VERIFICATION_HELPER_SOURCE}
+  return {
+    verificationRequired: verificationIsVisible(),
+    readyState: document.readyState,
+  }
+})()
+`
+
 function createYoukuSessionManager({
   BrowserWindow,
   sessionModule,
   getParentWindow = () => null,
   cacheDirectory,
   coverFetchTimeoutMs = COVER_FETCH_TIMEOUT_MS,
+  verificationPollMs = OFFICIAL_VERIFICATION_POLL_MS,
+  verificationTimeoutMs = OFFICIAL_VERIFICATION_TIMEOUT_MS,
   onAuthStateChange = () => undefined,
 } = {}) {
   if (typeof BrowserWindow !== 'function') throw new TypeError('BrowserWindow is required')
@@ -1028,6 +1429,16 @@ function createYoukuSessionManager({
     coverFetchTimeoutMs > 60_000
   ) {
     throw new TypeError('Youku cover fetch timeout is invalid')
+  }
+  if (
+    !Number.isSafeInteger(verificationPollMs) ||
+    verificationPollMs < 1 ||
+    verificationPollMs > 10_000 ||
+    !Number.isSafeInteger(verificationTimeoutMs) ||
+    verificationTimeoutMs < verificationPollMs ||
+    verificationTimeoutMs > 15 * 60 * 1_000
+  ) {
+    throw new TypeError('Youku verification timing is invalid')
   }
   const sharedSession = sessionModule.fromPartition(YOUKU_PARTITION, { cache: true })
   const coverTasks = new Map()
@@ -1193,6 +1604,7 @@ function createYoukuSessionManager({
   }
 
   function closeWindows() {
+    cancelSearches()
     if (loginWindow && !loginWindow.isDestroyed?.()) loginWindow.close()
     loginWindow = null
   }
@@ -1200,7 +1612,6 @@ function createYoukuSessionManager({
   async function logout() {
     suppressAuthEmission = true
     try {
-      cancelSearches()
       closeWindows()
       await sharedSession.closeAllConnections?.()
       if (typeof sharedSession.clearData === 'function') await sharedSession.clearData()
@@ -1360,6 +1771,10 @@ function createYoukuSessionManager({
     if (!context || context.owner !== operation) return
     context.owner = null
     clearOfficialSearchIdleTimer(context)
+    if (context.verificationWasShown) {
+      closeOfficialSearchWindow(context)
+      return
+    }
     context.idleTimer = setTimeout(() => {
       if (officialSearchContext === context && !context.owner) {
         closeOfficialSearchWindow(context)
@@ -1375,13 +1790,23 @@ function createYoukuSessionManager({
   }
 
   function createOfficialSearchWindow(query, generation) {
+    const parent = getParentWindow?.()
     const searchWindow = new BrowserWindow({
       width: 1024,
       height: 720,
+      minWidth: 760,
+      minHeight: 560,
+      parent: parent && !parent.isDestroyed?.() ? parent : undefined,
+      modal: false,
       show: false,
-      frame: false,
+      frame: true,
       skipTaskbar: true,
+      center: true,
+      closable: true,
+      minimizable: true,
+      maximizable: false,
       fullscreenable: false,
+      title: '完成优酷官方验证',
       backgroundColor: '#080b11',
       autoHideMenuBar: true,
       webPreferences: {
@@ -1404,6 +1829,8 @@ function createYoukuSessionManager({
       owner: null,
       loaded: false,
       idleTimer: null,
+      verificationVisible: false,
+      verificationWasShown: false,
     }
     const contents = searchWindow.webContents
     const allowSearchPage = (value) => {
@@ -1417,10 +1844,17 @@ function createYoukuSessionManager({
     const guardNavigation = (event, value) => {
       if (!allowSearchPage(value)) event.preventDefault()
     }
+    const guardRedirect = (event, value, _inPlace, isMainFrame = true) => {
+      if (isMainFrame !== false && !allowSearchPage(value)) {
+        event.preventDefault()
+      }
+    }
     contents.on?.('will-navigate', guardNavigation)
-    contents.on?.('will-redirect', guardNavigation)
+    contents.on?.('will-redirect', guardRedirect)
     contents.on?.('will-attach-webview', (event) => event.preventDefault())
     contents.setWindowOpenHandler?.(() => ({ action: 'deny' }))
+    searchWindow.setMenuBarVisibility?.(false)
+    keepWindowed(searchWindow)
     searchWindow.once?.('closed', () => {
       if (officialSearchContext === context) {
         officialSearchContext = null
@@ -1496,18 +1930,89 @@ function createYoukuSessionManager({
     return context
   }
 
+  function showOfficialVerificationWindow(context) {
+    if (!context || context.window.isDestroyed?.()) return false
+    context.verificationVisible = true
+    context.verificationWasShown = true
+    context.window.setSkipTaskbar?.(false)
+    context.window.show?.()
+    context.window.focus?.()
+    return true
+  }
+
+  async function waitForOfficialVerification(context, operation) {
+    if (
+      !context.verificationVisible &&
+      !showOfficialVerificationWindow(context)
+    ) {
+      throw createYoukuSearchError(
+        'Youku verification window is unavailable',
+        'YOUKU_SEARCH_VERIFICATION_CANCELLED',
+      )
+    }
+    operation.pauseTimeout?.()
+    if (!Number.isFinite(operation.verificationDeadline)) {
+      operation.verificationDeadline = Date.now() + verificationTimeoutMs
+    }
+    let consecutiveClearChecks = 0
+    while (Date.now() < operation.verificationDeadline) {
+      if (
+        operation.cancelled ||
+        operation.timedOut ||
+        operation.generation !== officialSearchGeneration
+      ) {
+        throw createYoukuSearchError(
+          'Youku search was cancelled',
+          'YOUKU_SEARCH_CANCELLED',
+        )
+      }
+      if (
+        officialSearchContext !== context ||
+        context.window.isDestroyed?.()
+      ) {
+        throw createYoukuSearchError(
+          'Youku verification was cancelled',
+          'YOUKU_SEARCH_VERIFICATION_CANCELLED',
+        )
+      }
+
+      let state = null
+      try {
+        state = await context.window.webContents.executeJavaScript(
+          READ_YOUKU_VERIFICATION_STATE_SCRIPT,
+          true,
+        )
+      } catch {
+        // The official document can be replaced while verification finishes.
+      }
+      if (
+        state?.verificationRequired === false &&
+        state?.readyState === 'complete'
+      ) {
+        consecutiveClearChecks += 1
+        if (consecutiveClearChecks >= 2) return
+      } else {
+        consecutiveClearChecks = 0
+      }
+      await delay(verificationPollMs)
+    }
+    throw createYoukuSearchError(
+      'Youku verification timed out',
+      'YOUKU_SEARCH_VERIFICATION_TIMEOUT',
+    )
+  }
+
   async function searchOfficialPage({ query, page, limit, operation }) {
     const context = await acquireOfficialSearchWindow(query, operation)
     try {
-      const payload = await context.window.webContents.executeJavaScript(
-        createYoukuOfficialPageSearchScript({ query, page, limit }),
-        true,
-      )
-      if (payload?.verificationRequired) {
-        throw createYoukuSearchError(
-          'Youku search requires official verification',
-          'YOUKU_SEARCH_VERIFICATION_REQUIRED',
+      let payload = null
+      while (true) {
+        payload = await context.window.webContents.executeJavaScript(
+          createYoukuOfficialPageSearchScript({ query, page, limit }),
+          true,
         )
+        if (!payload?.verificationRequired) break
+        await waitForOfficialVerification(context, operation)
       }
       const transientCode = {
         'client-not-ready': 'YOUKU_SEARCH_CLIENT_NOT_READY',
@@ -1536,21 +2041,24 @@ function createYoukuSessionManager({
       }
       return payload
     } finally {
+      if (context.verificationWasShown) operation.resumeTimeout?.()
       releaseOperationSearchWindow(operation)
     }
   }
 
-  async function searchVideos({ query, page = 1, limit } = {}) {
+  async function searchVideos({ query, page = 1, limit, searchType: rawSearchType } = {}) {
     if (disposed) throw new Error('Youku session manager is disposed')
     if (!Number.isSafeInteger(page) || page < 1) {
       throw new TypeError('Youku search page is invalid')
     }
     const safeQuery = typeof query === 'string' ? query.trim() : ''
+    const searchType = normalizeYoukuSearchType(rawSearchType)
+    const searchIdentity = `${searchType}\u0000${safeQuery}`
     const searchUrl = createYoukuSearchUrl(safeQuery)
     const safeLimit = normalizeLimit(limit)
-    if (page === 1 || officialSearchQuery !== safeQuery) {
+    if (page === 1 || officialSearchQuery !== searchIdentity) {
       officialSearchGeneration += 1
-      officialSearchQuery = safeQuery
+      officialSearchQuery = searchIdentity
       activeSearches.forEach((existingOperation) => {
         if (!existingOperation.usesOfficialPage) return
         existingOperation.cancelled = true
@@ -1573,9 +2081,19 @@ function createYoukuSessionManager({
       timedOut: false,
       cancelled: false,
       usesOfficialPage: page > 1,
+      pauseTimeout: null,
+      resumeTimeout: null,
+      verificationDeadline: null,
     }
     activeSearches.add(operation)
-    const timer = setTimeout(() => {
+    let timer = null
+    const clearOperationTimeout = () => {
+      if (timer === null) return
+      clearTimeout(timer)
+      timer = null
+    }
+    const timeOutOperation = () => {
+      timer = null
       if (operation.searchCompleted) return
       operation.timedOut = true
       controller.abort()
@@ -1588,7 +2106,22 @@ function createYoukuSessionManager({
           ? 'YOUKU_SEARCH_OFFICIAL_TIMEOUT'
           : 'YOUKU_SEARCH_TIMEOUT',
       ))
-    }, page > 1 ? OFFICIAL_SEARCH_TIMEOUT_MS : SEARCH_TIMEOUT_MS)
+    }
+    const armOperationTimeout = () => {
+      clearOperationTimeout()
+      if (
+        operation.searchCompleted ||
+        operation.cancelled ||
+        operation.timedOut
+      ) return
+      timer = setTimeout(
+        timeOutOperation,
+        page > 1 ? OFFICIAL_SEARCH_TIMEOUT_MS : SEARCH_TIMEOUT_MS,
+      )
+    }
+    operation.pauseTimeout = clearOperationTimeout
+    operation.resumeTimeout = armOperationTimeout
+    armOperationTimeout()
     try {
       if (page > 1) {
         const officialPageTermination = new Promise((_resolve, reject) => {
@@ -1633,11 +2166,11 @@ function createYoukuSessionManager({
         )
         const normalized = normalizeYoukuSearchPayload(
           officialPayload,
-          { query: safeQuery, page, limit: safeLimit },
+          { query: safeQuery, page, limit: safeLimit, searchType },
         )
         operation.searchCompleted = true
         operation.rejectOfficialPage = null
-        clearTimeout(timer)
+        clearOperationTimeout()
         normalized.results = await Promise.all(normalized.results.map(async (item) => ({
           ...item,
           thumbnailPath: await cacheCover(item.coverUrl),
@@ -1691,10 +2224,10 @@ function createYoukuSessionManager({
       }
       const normalized = normalizeYoukuSearchPayload(
         extractYoukuInitialData(html),
-        { query: safeQuery, page, limit: safeLimit },
+        { query: safeQuery, page, limit: safeLimit, searchType },
       )
       operation.searchCompleted = true
-      clearTimeout(timer)
+      clearOperationTimeout()
       normalized.results = await Promise.all(normalized.results.map(async (item) => ({
         ...item,
         thumbnailPath: await cacheCover(item.coverUrl),
@@ -1715,7 +2248,9 @@ function createYoukuSessionManager({
       )
       throw error
     } finally {
-      clearTimeout(timer)
+      clearOperationTimeout()
+      operation.pauseTimeout = null
+      operation.resumeTimeout = null
       operation.rejectOfficialPage = null
       closeOperationSearchWindow(operation)
       activeSearches.delete(operation)
@@ -1743,7 +2278,6 @@ function createYoukuSessionManager({
     dispose() {
       if (disposed) return
       disposed = true
-      cancelSearches()
       sharedSession.removeListener?.('will-download', preventDownload)
       sharedSession.cookies.removeListener?.('changed', handleCookieChanged)
       closeWindows()
@@ -1758,10 +2292,12 @@ function createYoukuSessionManager({
 }
 
 module.exports = {
+  ENTER_YOUKU_WEB_FULLSCREEN_SCRIPT,
   YOUKU_AUTH_COOKIE_NAME,
   YOUKU_EMBEDDED_PLAYER_CSS,
   YOUKU_LOGIN_URL,
   YOUKU_PARTITION,
+  captureYoukuEmbeddedFrame,
   createYoukuPlaybackUrl,
   createYoukuSearchUrl,
   createYoukuSessionManager,

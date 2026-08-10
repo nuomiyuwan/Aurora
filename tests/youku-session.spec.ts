@@ -7,9 +7,11 @@ import { expect, test } from '@playwright/test'
 
 const require = createRequire(import.meta.url)
 const {
+  ENTER_YOUKU_WEB_FULLSCREEN_SCRIPT,
   YOUKU_EMBEDDED_PLAYER_CSS,
   YOUKU_LOGIN_URL,
   YOUKU_PARTITION,
+  captureYoukuEmbeddedFrame,
   createYoukuPlaybackUrl,
   createYoukuSearchUrl,
   createYoukuSessionManager,
@@ -21,9 +23,14 @@ const {
   normalizeYoukuSearchPayload,
   parseYoukuOfficialPageUrl,
 } = require('../electron/youkuSession.cjs') as {
+  ENTER_YOUKU_WEB_FULLSCREEN_SCRIPT: string
   YOUKU_EMBEDDED_PLAYER_CSS: string
   YOUKU_LOGIN_URL: string
   YOUKU_PARTITION: string
+  captureYoukuEmbeddedFrame(
+    hostContents: EventEmitter,
+    request: { kind: 'video' | 'episode'; mediaId: string },
+  ): Promise<string | null>
   createYoukuPlaybackUrl(request: {
     showId?: string
     videoId?: string
@@ -203,7 +210,10 @@ class FakeWindow extends EventEmitter {
   destroyed = false
   loadUrl = ''
   showCount = 0
+  hideCount = 0
+  focusCount = 0
   fullscreenValues: boolean[] = []
+  skipTaskbarValues: boolean[] = []
 
   constructor(options: Record<string, unknown>) {
     super()
@@ -215,8 +225,11 @@ class FakeWindow extends EventEmitter {
   isMinimized() { return false }
   loadURL(url: string) { this.loadUrl = url; this.webContents.currentUrl = url; return Promise.resolve() }
   show() { this.showCount += 1 }
-  focus() { return undefined }
+  hide() { this.hideCount += 1 }
+  focus() { this.focusCount += 1 }
   close() { this.destroyed = true; this.emit('closed') }
+  setMenuBarVisibility() { return undefined }
+  setSkipTaskbar(value: boolean) { this.skipTaskbarValues.push(value) }
   setFullScreen(value: boolean) { this.fullscreenValues.push(value) }
   setFullScreenable() { return undefined }
   setSimpleFullScreen() { return undefined }
@@ -226,8 +239,13 @@ class FakeWindow extends EventEmitter {
 class FakeGuest extends EventEmitter {
   session: object
   currentUrl: string
+  destroyed = false
   insertedCss: string[] = []
+  executedScripts: Array<{ script: string; userGesture: boolean }> = []
   windowOpenHandler: (() => { action: string }) | null = null
+  frameReady = true
+  capturedImage: unknown = null
+  webFullscreenResults: Array<string | Error | Promise<string>> = ['clicked']
 
   constructor(url: string, session: object) {
     super()
@@ -236,9 +254,21 @@ class FakeGuest extends EventEmitter {
   }
 
   getURL() { return this.currentUrl }
-  isDestroyed() { return false }
+  isDestroyed() { return this.destroyed }
   loadURL(url: string) { this.currentUrl = url; return Promise.resolve() }
   insertCSS(css: string) { this.insertedCss.push(css); return Promise.resolve('key') }
+  executeJavaScript(script: string, userGesture = false) {
+    this.executedScripts.push({ script, userGesture })
+    if (script.includes('aurora-youku-enter-web-fullscreen')) {
+      const result = this.webFullscreenResults.length > 0
+        ? this.webFullscreenResults.shift()
+        : 'clicked'
+      if (result instanceof Error) return Promise.reject(result)
+      return Promise.resolve(result)
+    }
+    return Promise.resolve(this.frameReady)
+  }
+  capturePage() { return Promise.resolve(this.capturedImage) }
   invalidate() { return undefined }
   setWindowOpenHandler(handler: () => { action: string }) { this.windowOpenHandler = handler }
 }
@@ -353,6 +383,26 @@ test('normalizes one series root and one UGC root without leaking episode nodes'
   })).toMatchObject({ page: 2, hasMore: true, nextPage: 3 })
 })
 
+test('filters Youku official and user result identities without changing all results', () => {
+  const request = { query: '甄嬛传', page: 1, limit: 12 }
+  expect(normalizeYoukuSearchPayload(makePayload(), {
+    ...request,
+    searchType: 'official',
+  }).results).toEqual([
+    expect.objectContaining({ kind: 'episode', mediaId: SHOW_ID }),
+  ])
+  expect(normalizeYoukuSearchPayload(makePayload(), {
+    ...request,
+    searchType: 'user',
+  }).results).toEqual([
+    expect.objectContaining({ kind: 'video', mediaId: VIDEO_ID }),
+  ])
+  expect(() => normalizeYoukuSearchPayload(makePayload(), {
+    ...request,
+    searchType: 'advertisement',
+  })).toThrow('search type')
+})
+
 test('uses reviewed screenshot and nested poster fallbacks when Youku nodes mix IDs', () => {
   const payload = makePayload()
   const program = payload.data.nodes[0].nodes[0].data
@@ -398,6 +448,68 @@ test('accepts only reviewed authentication navigation origins', () => {
   expect(isAllowedYoukuAuthNavigationUrl('http://youku.com')).toBe(true)
   expect(isAllowedYoukuAuthNavigationUrl('https://youku.com.evil.example')).toBe(false)
   expect(isAllowedYoukuAuthNavigationUrl('file:///tmp/login.html')).toBe(false)
+})
+
+test('prefers the official Youku web-fullscreen API and keeps strict control fallbacks', () => {
+  const executeScript = new Function(
+    'window',
+    'document',
+    `return (${ENTER_YOUKU_WEB_FULLSCREEN_SCRIPT.trim()})`,
+  ) as (windowValue: object, documentValue: object) => string
+  let documentQueryCount = 0
+  const unavailableDocument = {
+    querySelector() {
+      documentQueryCount += 1
+      throw new Error('the official API path must not query fallback controls')
+    },
+  }
+  const apiCalls: boolean[] = []
+  expect(executeScript({
+    videoPlayer: {
+      getPlayerState: () => ({ webFullscreen: false }),
+      webFullscreen: (enabled: boolean) => apiCalls.push(enabled),
+    },
+  }, unavailableDocument)).toBe('clicked')
+  expect(apiCalls).toEqual([true])
+  expect(documentQueryCount).toBe(0)
+
+  expect(executeScript({
+    videoPlayer: {
+      getPlayerState: () => ({ webFullscreen: true }),
+      webFullscreen: () => { throw new Error('already active') },
+    },
+  }, unavailableDocument)).toBe('already')
+  expect(documentQueryCount).toBe(0)
+
+  let clicked = 0
+  let fallbackSelector = ''
+  const neutralNode = {
+    getAttribute: () => '',
+  }
+  const fallbackControl = {
+    textContent: '',
+    getAttribute: (name: string) => name === 'title' ? '网页全屏' : '',
+    closest: () => fallbackControl,
+    getClientRects: () => [{}],
+    click: () => { clicked += 1 },
+  }
+  const player = {
+    ...neutralNode,
+    querySelectorAll(selector: string) {
+      fallbackSelector = selector
+      return [fallbackControl]
+    },
+    contains: (value: unknown) => value === fallbackControl,
+  }
+  expect(executeScript({}, {
+    body: neutralNode,
+    documentElement: neutralNode,
+    fullscreenElement: null,
+    querySelector: () => player,
+  })).toBe('clicked')
+  expect(clicked).toBe(1)
+  expect(fallbackSelector).toBe('#webfullscreen-icon, #webfullscreen2-icon')
+  expect(fallbackSelector).not.toMatch(/^#fullscreen(?:2)?-icon/)
 })
 
 test('hardens Youku webview preferences and owns no other provider partition', async () => {
@@ -458,7 +570,55 @@ test('hardens Youku webview preferences and owns no other provider partition', a
     /(?:visibility\s*:\s*hidden|display\s*:\s*none)/i,
   )
   expect(YOUKU_EMBEDDED_PLAYER_CSS).not.toContain('2147483647')
+  expect(ENTER_YOUKU_WEB_FULLSCREEN_SCRIPT).toContain(
+    'aurora-youku-enter-web-fullscreen',
+  )
+  expect(ENTER_YOUKU_WEB_FULLSCREEN_SCRIPT).toContain(
+    "'#webfullscreen-icon, #webfullscreen2-icon'",
+  )
+  expect(ENTER_YOUKU_WEB_FULLSCREEN_SCRIPT).not.toMatch(
+    /querySelector(?:All)?\(\s*['"]#fullscreen(?:2)?-icon/,
+  )
+  expect(ENTER_YOUKU_WEB_FULLSCREEN_SCRIPT).not.toContain('requestFullscreen')
+  const fullscreenExecutions = guest.executedScripts.filter(({ script }) =>
+    script.includes('aurora-youku-enter-web-fullscreen')
+  )
+  expect(fullscreenExecutions).toHaveLength(1)
+  expect(fullscreenExecutions[0].userGesture).toBe(true)
+  guest.emit('dom-ready')
+  guest.emit('did-finish-load')
+  guest.emit('did-stop-loading')
+  await Promise.resolve()
+  expect(guest.executedScripts.filter(({ script }) =>
+    script.includes('aurora-youku-enter-web-fullscreen')
+  )).toHaveLength(1)
   expect(guest.windowOpenHandler?.()).toEqual({ action: 'deny' })
+
+  const capturedDataUrl =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB'
+  const resizedImage = {
+    isEmpty: () => false,
+    getSize: () => ({ width: 480, height: 270 }),
+    toDataURL: () => capturedDataUrl,
+  }
+  guest.capturedImage = {
+    isEmpty: () => false,
+    getSize: () => ({ width: 1_280, height: 720 }),
+    resize: () => resizedImage,
+  }
+  await expect(captureYoukuEmbeddedFrame(host, {
+    kind: 'episode',
+    mediaId: SHOW_ID,
+  })).resolves.toBe(capturedDataUrl)
+  await expect(captureYoukuEmbeddedFrame(host, {
+    kind: 'video',
+    mediaId: VIDEO_ID,
+  })).resolves.toBeNull()
+  guest.frameReady = false
+  await expect(captureYoukuEmbeddedFrame(host, {
+    kind: 'episode',
+    mediaId: SHOW_ID,
+  })).resolves.toBeNull()
 
   let subframeRedirectPrevented = false
   guest.emit(
@@ -488,6 +648,88 @@ test('hardens Youku webview preferences and owns no other provider partition', a
     { partition: YOUKU_PARTITION, src: 'https://evil.example/video' },
   )
   expect(invalidPrevented).toBe(true)
+  dispose()
+})
+
+test('enters Youku web fullscreen once per document and ignores stale completion', async () => {
+  const host = new EventEmitter()
+  const expectedSession = { getPartition: () => YOUKU_PARTITION }
+  const dispose = installYoukuPlayerWebviewGuard(host, expectedSession)
+  const url = `https://v.youku.com/video?s=${SHOW_ID}`
+  let resolveStaleAttempt: ((value: string) => void) | null = null
+  const guest = new FakeGuest(url, expectedSession)
+  guest.webFullscreenResults = [
+    new Promise<string>((resolve) => { resolveStaleAttempt = resolve }),
+    'clicked',
+  ]
+  host.emit(
+    'will-attach-webview',
+    { preventDefault: () => undefined },
+    { partition: YOUKU_PARTITION },
+    { partition: YOUKU_PARTITION, src: url },
+  )
+  host.emit('did-attach-webview', {}, guest)
+  expect(guest.executedScripts.filter(({ script }) =>
+    script.includes('aurora-youku-enter-web-fullscreen')
+  )).toHaveLength(1)
+
+  guest.emit('did-start-navigation', {}, url, false, true)
+  guest.currentUrl = url
+  guest.emit('dom-ready')
+  await Promise.resolve()
+  expect(guest.executedScripts.filter(({ script }) =>
+    script.includes('aurora-youku-enter-web-fullscreen')
+  )).toHaveLength(2)
+
+  resolveStaleAttempt?.('clicked')
+  await Promise.resolve()
+  guest.emit('did-finish-load')
+  guest.emit('did-stop-loading')
+  await Promise.resolve()
+  expect(guest.executedScripts.filter(({ script }) =>
+    script.includes('aurora-youku-enter-web-fullscreen')
+  )).toHaveLength(2)
+  expect(guest.executedScripts.every(({ userGesture }) => userGesture)).toBe(true)
+  guest.destroyed = true
+  guest.emit('destroyed')
+  dispose()
+})
+
+test('bounds Youku web-fullscreen retries and cancels them on guest destruction', async () => {
+  const host = new EventEmitter()
+  const expectedSession = { getPartition: () => YOUKU_PARTITION }
+  const dispose = installYoukuPlayerWebviewGuard(host, expectedSession)
+  const url = `https://v.youku.com/video?s=${SHOW_ID}`
+  const guest = new FakeGuest(url, expectedSession)
+  guest.webFullscreenResults = ['not-ready', 'clicked']
+  host.emit(
+    'will-attach-webview',
+    { preventDefault: () => undefined },
+    { partition: YOUKU_PARTITION },
+    { partition: YOUKU_PARTITION, src: url },
+  )
+  host.emit('did-attach-webview', {}, guest)
+  await expect.poll(() => guest.executedScripts.filter(({ script }) =>
+    script.includes('aurora-youku-enter-web-fullscreen')
+  ).length).toBe(2)
+  guest.emit('dom-ready')
+  guest.emit('did-finish-load')
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  expect(guest.executedScripts.filter(({ script }) =>
+    script.includes('aurora-youku-enter-web-fullscreen')
+  )).toHaveLength(2)
+
+  guest.webFullscreenResults = ['not-ready', 'clicked']
+  guest.emit('did-start-navigation', {}, url, false, true)
+  guest.currentUrl = url
+  guest.emit('dom-ready')
+  await Promise.resolve()
+  guest.destroyed = true
+  guest.emit('destroyed')
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  expect(guest.executedScripts.filter(({ script }) =>
+    script.includes('aurora-youku-enter-web-fullscreen')
+  )).toHaveLength(3)
   dispose()
 })
 
@@ -766,21 +1008,80 @@ test('does not turn an official verification page into an empty result', async (
   manager.dispose()
 })
 
-test('surfaces official verification on later pages instead of bypassing it', async () => {
+test('shows official verification and resumes the requested later page', async () => {
   FakeWindow.instances = []
-  FakeWebContents.executeJavaScriptResult = { verificationRequired: true }
+  let searchExecutionCount = 0
+  let verificationPollCount = 0
+  FakeWebContents.executeJavaScriptResult = (script: string) => {
+    if (script.includes('aurora-youku-verification-state')) {
+      verificationPollCount += 1
+      return verificationPollCount === 1
+        ? { verificationRequired: true, readyState: 'complete' }
+        : { verificationRequired: false, readyState: 'complete' }
+    }
+    searchExecutionCount += 1
+    if (searchExecutionCount === 2) {
+      const verificationWindow = FakeWindow.instances.at(-1)!
+      expect(verificationWindow.showCount).toBe(1)
+      expect(verificationWindow.destroyed).toBe(false)
+    }
+    return searchExecutionCount === 1
+      ? { verificationRequired: true }
+      : { data: makePayload().data }
+  }
   const fakeSession = new FakeSession()
   const manager = createYoukuSessionManager({
     BrowserWindow: FakeWindow,
     sessionModule: { fromPartition: () => fakeSession },
+    verificationPollMs: 1,
+    verificationTimeoutMs: 100,
   })
   try {
-    await expect(manager.searchVideos({
+    const result = await manager.searchVideos({
       query: '汽车',
       page: 2,
       limit: 12,
-    })).rejects.toThrow('requires official verification')
+    })
+    expect(result.page).toBe(2)
+    expect(result.nextPage).toBe(3)
     expect(FakeWindow.instances).toHaveLength(1)
+    const verificationWindow = FakeWindow.instances.at(-1)!
+    expect(verificationWindow.options.frame).toBe(true)
+    expect(verificationWindow.showCount).toBe(1)
+    expect(verificationWindow.focusCount).toBe(1)
+    expect(verificationWindow.hideCount).toBe(0)
+    expect(verificationWindow.destroyed).toBe(true)
+    expect(searchExecutionCount).toBe(2)
+    expect(verificationPollCount).toBe(3)
+  } finally {
+    FakeWebContents.executeJavaScriptResult = undefined
+    manager.dispose()
+  }
+})
+
+test('closing provider windows cancels an in-progress verification', async () => {
+  FakeWindow.instances = []
+  FakeWebContents.executeJavaScriptResult = (script: string) => (
+    script.includes('aurora-youku-verification-state')
+      ? { verificationRequired: true, readyState: 'complete' }
+      : { verificationRequired: true }
+  )
+  const fakeSession = new FakeSession()
+  const manager = createYoukuSessionManager({
+    BrowserWindow: FakeWindow,
+    sessionModule: { fromPartition: () => fakeSession },
+    verificationPollMs: 1,
+    verificationTimeoutMs: 1_000,
+  })
+  try {
+    const search = manager.searchVideos({
+      query: '汽车',
+      page: 2,
+      limit: 12,
+    })
+    await expect.poll(() => FakeWindow.instances.at(-1)?.showCount ?? 0).toBe(1)
+    manager.closeWindows()
+    await expect(search).rejects.toThrow('cancelled')
     expect(FakeWindow.instances.at(-1)?.destroyed).toBe(true)
   } finally {
     FakeWebContents.executeJavaScriptResult = undefined

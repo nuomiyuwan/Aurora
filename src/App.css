@@ -1433,9 +1433,69 @@ input:focus-visible {
 }
 
 .pageSettingsFooter {
+  display: grid;
   flex: 0 0 auto;
+  gap: 10px;
   border-top: 1px solid rgba(220, 226, 238, 0.085);
   padding: 12px 17px 14px;
+}
+
+.pageSettingsVersionRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pageSettingsVersionRow > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.pageSettingsVersionRow strong {
+  color: rgba(226, 233, 244, 0.78);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.pageSettingsVersionRow small {
+  color: rgba(177, 189, 208, 0.38);
+  font-size: 8px;
+}
+
+.pageSettingsVersionRow button {
+  max-width: 130px;
+  min-height: 27px;
+  overflow: hidden;
+  border: 1px solid rgba(211, 224, 243, 0.11);
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(186, 207, 238, 0.64);
+  cursor: pointer;
+  font: inherit;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 9px;
+}
+
+.pageSettingsVersionRow button:hover:not(:disabled) {
+  border-color: rgba(178, 207, 250, 0.24);
+  color: rgba(217, 231, 251, 0.84);
+}
+
+.pageSettingsVersionRow button:disabled {
+  cursor: default;
+  opacity: 0.54;
+}
+
+.pageSettingsUpdateError {
+  margin: -3px 0 0;
+  color: rgba(237, 164, 155, 0.67);
+  font-size: 8px;
+  line-height: 1.4;
 }
 
 .pageSettingsResetButton {
@@ -2678,6 +2738,10 @@ input:focus-visible {
   touch-action: pan-y;
 }
 
+.videoClipHitTarget[data-hover-scrubbing] {
+  cursor: ew-resize;
+}
+
 .videoClipMenuHitTarget {
   position: absolute;
   visibility: hidden;
@@ -2891,7 +2955,7 @@ input:focus-visible {
   border-radius: 15px 15px 0px 0px;
   background-image:
     linear-gradient(180deg, rgba(6, 9, 14, 0), rgba(6, 9, 14, 0.22) 62%, rgba(5, 7, 11, 0.58)),
-    var(--clip-cover);
+    var(--clip-preview-cover, var(--clip-cover));
   background-position: center;
   background-size: cover;
   box-shadow: none;
@@ -2899,8 +2963,41 @@ input:focus-visible {
   clip-path: none;
 }
 
+.videoClipHoverScrubVideo {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: rgba(4, 7, 12, 0.96);
+  object-fit: cover;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 90ms ease;
+}
+
+.videoClipHoverScrubVideo[data-frame-ready='true'] {
+  opacity: 1;
+}
+
 .videoClipImage::after {
   content: none;
+}
+
+.videoClipImage[data-hover-scrubbing='video']::after {
+  content: '';
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    rgba(6, 9, 14, 0),
+    rgba(6, 9, 14, 0.22) 62%,
+    rgba(5, 7, 11, 0.58)
+  );
+  pointer-events: none;
 }
 
 .videoClipFrame {
@@ -4352,6 +4449,491 @@ input:focus-visible {
   white-space: nowrap;
 }
 
+.frameRingSmartOrganizeOverlay {
+  z-index: 82;
+}
+
+.frameRingSmartOrganizePanel {
+  width: 640px;
+  max-height: min(780px, calc(100vh - 72px));
+  gap: 16px;
+  overflow: hidden;
+}
+
+.frameRingSmartOrganizeHeader p {
+  max-width: 500px;
+}
+
+.frameRingSmartOrganizeSection {
+  display: grid;
+  gap: 9px;
+}
+
+.frameRingSmartOrganizeSectionTitle,
+.frameRingSmartOrganizeSectionTitle strong,
+.frameRingSmartOrganizeSectionTitle span {
+  display: flex;
+  align-items: center;
+}
+
+.frameRingSmartOrganizeSectionTitle {
+  justify-content: space-between;
+  color: rgba(218, 222, 231, 0.66);
+  font-size: 12px;
+}
+
+.frameRingSmartOrganizeSectionTitle strong {
+  color: rgba(235, 238, 244, 0.84);
+  font-weight: 500;
+}
+
+.frameRingSmartOrganizeSectionTitle span {
+  color: rgba(202, 209, 221, 0.38);
+  font-size: 10px;
+}
+
+.frameRingSmartSensitivity {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  height: 42px;
+  overflow: hidden;
+  padding: 3px;
+}
+
+.frameRingSmartSensitivity button {
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(210, 216, 227, 0.48);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  transition: background-color 180ms ease, color 180ms ease;
+}
+
+.frameRingSmartSensitivity button.active {
+  background: rgba(121, 158, 216, 0.12);
+  color: rgba(219, 232, 253, 0.88);
+}
+
+.frameRingSmartFeatureList {
+  display: grid;
+  gap: 8px;
+}
+
+.frameRingSmartFeatureList > div,
+.frameRingSmartFeatureList > label {
+  display: grid;
+  min-height: 58px;
+  grid-template-columns: 34px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  border-radius: 12px;
+  padding: 9px 12px;
+}
+
+.frameRingSmartFeatureList strong,
+.frameRingSmartFeatureList small,
+.frameRingSmartAnnotationOption strong,
+.frameRingSmartAnnotationOption small {
+  display: block;
+}
+
+.frameRingSmartFeatureList strong,
+.frameRingSmartAnnotationOption strong {
+  color: rgba(235, 238, 244, 0.78);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.frameRingSmartFeatureList small,
+.frameRingSmartAnnotationOption small {
+  margin-top: 3px;
+  color: rgba(203, 210, 222, 0.4);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.frameRingSmartFeatureIcon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(166, 196, 242, 0.12);
+  border-radius: 9px;
+  color: rgba(174, 204, 250, 0.78);
+  place-items: center;
+}
+
+.frameRingSmartFeatureState {
+  color: rgba(175, 208, 255, 0.66);
+  font-size: 10px;
+}
+
+.frameRingSmartFeatureList input,
+.frameRingSmartAnnotationOption input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.frameRingSmartSwitch {
+  position: relative;
+  width: 34px;
+  height: 19px;
+  border: 1px solid rgba(174, 193, 222, 0.18);
+  border-radius: 999px;
+  background: rgba(57, 67, 84, 0.26);
+  transition: border-color 180ms ease, background-color 180ms ease;
+}
+
+.frameRingSmartSwitch::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: rgba(208, 216, 229, 0.52);
+  content: '';
+  transition: transform 180ms ease, background-color 180ms ease;
+}
+
+.frameRingSmartFeatureList input:checked + .frameRingSmartSwitch,
+.frameRingSmartAnnotationOption input:checked + .frameRingSmartSwitch {
+  border-color: rgba(142, 184, 247, 0.32);
+  background: rgba(94, 139, 210, 0.22);
+}
+
+.frameRingSmartFeatureList input:checked + .frameRingSmartSwitch::after,
+.frameRingSmartAnnotationOption input:checked + .frameRingSmartSwitch::after {
+  background: rgba(196, 220, 255, 0.9);
+  transform: translateX(15px);
+}
+
+.frameRingSmartFeatureList input:disabled + .frameRingSmartSwitch {
+  opacity: 0.36;
+}
+
+.frameRingSmartOrganizeNotice {
+  margin: -2px 0 0;
+  color: rgba(199, 207, 220, 0.38);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.frameRingSmartOrganizeBusy {
+  display: grid;
+  min-height: 260px;
+  align-content: center;
+  justify-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.frameRingSmartOrganizeBusyIcon {
+  display: grid;
+  width: 58px;
+  height: 58px;
+  border: 1px solid rgba(151, 188, 244, 0.2);
+  border-radius: 18px;
+  color: rgba(185, 213, 255, 0.86);
+  place-items: center;
+  animation: frameRingSmartPulse 1.8s ease-in-out infinite;
+}
+
+.frameRingSmartOrganizeBusy strong {
+  color: rgba(239, 241, 246, 0.88);
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.frameRingSmartOrganizeBusy small {
+  max-width: 400px;
+  color: rgba(203, 210, 222, 0.42);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.frameRingSmartSummary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-top: 1px solid rgba(215, 224, 239, 0.08);
+  border-bottom: 1px solid rgba(215, 224, 239, 0.08);
+  padding: 11px 0;
+}
+
+.frameRingSmartSummary span {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  color: rgba(201, 209, 222, 0.42);
+  font-size: 9px;
+}
+
+.frameRingSmartSummary span + span {
+  border-left: 1px solid rgba(215, 224, 239, 0.08);
+}
+
+.frameRingSmartSummary strong {
+  color: rgba(221, 233, 252, 0.84);
+  font-size: 15px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.frameRingSmartCandidateList {
+  display: grid;
+  max-height: min(282px, 38vh);
+  gap: 7px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 3px;
+}
+
+.frameRingSmartCandidate {
+  display: grid;
+  min-height: 64px;
+  grid-template-columns: 20px 82px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  border-radius: 11px;
+  color: inherit;
+  cursor: pointer;
+  padding: 7px 10px;
+  text-align: left;
+}
+
+.frameRingSmartCandidate.selected {
+  border-color: rgba(149, 190, 251, 0.3);
+  background: rgba(91, 133, 198, 0.08);
+}
+
+.frameRingSmartCandidateCheck {
+  display: grid;
+  width: 17px;
+  height: 17px;
+  box-sizing: border-box;
+  border: 1px solid rgba(180, 199, 228, 0.24);
+  border-radius: 5px;
+  color: rgba(213, 231, 255, 0.92);
+  place-items: center;
+}
+
+.frameRingSmartCandidate.selected .frameRingSmartCandidateCheck {
+  border-color: rgba(152, 195, 255, 0.5);
+  background: rgba(107, 158, 236, 0.2);
+}
+
+.frameRingSmartCandidate img,
+.frameRingSmartCandidatePlaceholder {
+  display: block;
+  width: 82px;
+  height: 48px;
+  border-radius: 7px;
+  object-fit: cover;
+}
+
+.frameRingSmartCandidatePlaceholder {
+  background: rgba(104, 124, 154, 0.12);
+}
+
+.frameRingSmartCandidateCopy {
+  min-width: 0;
+}
+
+.frameRingSmartCandidateCopy strong,
+.frameRingSmartCandidateCopy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.frameRingSmartCandidateCopy strong {
+  color: rgba(235, 238, 244, 0.82);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.frameRingSmartCandidateCopy small {
+  margin-top: 5px;
+  color: rgba(199, 207, 220, 0.4);
+  font-size: 9px;
+}
+
+.frameRingSmartCandidateConfidence {
+  color: rgba(176, 205, 247, 0.56);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.frameRingSmartEmpty {
+  display: grid;
+  min-height: 150px;
+  align-content: center;
+  justify-items: center;
+  gap: 7px;
+  border-radius: 12px;
+  color: rgba(180, 207, 246, 0.66);
+  text-align: center;
+}
+
+.frameRingSmartEmpty strong {
+  color: rgba(232, 236, 243, 0.78);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.frameRingSmartEmpty small {
+  color: rgba(201, 209, 222, 0.4);
+  font-size: 10px;
+}
+
+.frameRingSmartAnnotationOption {
+  display: grid;
+  min-height: 52px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  box-sizing: border-box;
+  border-radius: 11px;
+  padding: 8px 11px;
+}
+
+.frameRingSmartSuggestionList {
+  display: grid;
+  max-height: min(305px, 40vh);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.frameRingSmartSuggestionList > div {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 9px;
+  border-radius: 11px;
+  padding: 7px;
+}
+
+.frameRingSmartSuggestionList img {
+  width: 76px;
+  height: 54px;
+  border-radius: 7px;
+  object-fit: cover;
+}
+
+.frameRingSmartSuggestionList strong,
+.frameRingSmartSuggestionList small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.frameRingSmartSuggestionList strong {
+  color: rgba(229, 234, 242, 0.76);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.frameRingSmartSuggestionList small {
+  margin-top: 3px;
+  color: rgba(199, 207, 221, 0.42);
+  font-size: 9px;
+}
+
+.frameRingSmartSuggestionTags {
+  display: flex;
+  min-width: 0;
+  gap: 4px;
+  margin-top: 6px;
+  overflow: hidden;
+}
+
+.frameRingSmartSuggestionTags i {
+  border: 1px solid rgba(167, 194, 235, 0.12);
+  border-radius: 5px;
+  color: rgba(183, 207, 242, 0.58);
+  font-size: 8px;
+  font-style: normal;
+  padding: 2px 4px;
+  white-space: nowrap;
+}
+
+.frameRingSmartComplete {
+  display: grid;
+  min-height: 250px;
+  align-content: center;
+  justify-items: center;
+  gap: 9px;
+  text-align: center;
+}
+
+.frameRingSmartComplete > span {
+  display: grid;
+  width: 58px;
+  height: 58px;
+  border: 1px solid rgba(149, 192, 251, 0.24);
+  border-radius: 18px;
+  color: rgba(196, 220, 255, 0.9);
+  place-items: center;
+}
+
+.frameRingSmartComplete strong {
+  color: rgba(239, 241, 246, 0.88);
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.frameRingSmartComplete small,
+.frameRingSmartComplete p {
+  margin: 0;
+  color: rgba(201, 209, 222, 0.44);
+  font-size: 11px;
+}
+
+.frameRingSmartComplete p {
+  color: rgba(183, 200, 225, 0.34);
+  font-size: 9px;
+}
+
+.frameRingSmartError {
+  margin: -2px 0 0;
+  border: 1px solid rgba(226, 122, 132, 0.14);
+  border-radius: 9px;
+  background: rgba(126, 45, 56, 0.08);
+  color: rgba(241, 168, 176, 0.72);
+  font-size: 10px;
+  line-height: 1.45;
+  padding: 8px 10px;
+}
+
+.frameRingSmartOrganizePanel .primaryAction {
+  min-width: 128px;
+}
+
+.frameRingSmartOrganizePanel .frameRingSmartUndo {
+  width: 146px;
+}
+
+@keyframes frameRingSmartPulse {
+  0%,
+  100% {
+    opacity: 0.64;
+    transform: scale(0.96);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.03);
+  }
+}
+
 .panelClose {
   position: absolute;
   top: 19px;
@@ -5585,6 +6167,84 @@ input:focus-visible {
   background: #03060a;
 }
 
+.frameRingPreviewOnlinePlayer[data-online-player-layout='portrait-contain'],
+.frameRingPreviewOnlineWebview[data-online-player-layout='portrait-contain'] {
+  background: #000;
+}
+
+.frameRingPreviewOnlinePlayer[data-online-player-layout='portrait-contain'] {
+  container-name: douyin-player;
+  container-type: inline-size;
+  isolation: isolate;
+}
+
+/*
+ * Douyin's official embedded player switches to a narrow redirect layout
+ * below 730 CSS pixels. Aurora's 3D preview is intentionally much smaller on
+ * compact/Retina windows, so give only that guest a desktop-sized layout
+ * viewport and scale its complete official surface back into the frame.
+ * This keeps both landscape video and Douyin's native blurred portrait fill.
+ */
+@container douyin-player (max-width: 729px) {
+  .frameRingPreviewOnlineWebview[data-online-player-layout='portrait-contain'] {
+    right: auto;
+    bottom: auto;
+    width: 200%;
+    height: 200%;
+    transform: scale(0.5);
+    transform-origin: 0 0;
+  }
+}
+
+.frameRingPreviewOnlinePlayer > .frameRingPreviewOnlineAmbientFallback {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  overflow: hidden;
+  padding: 0;
+  background: #000;
+  opacity: 1;
+  pointer-events: none;
+  transition: opacity 220ms ease-out;
+}
+
+.frameRingPreviewOnlinePlayer[data-online-player-ready='true']
+  > .frameRingPreviewOnlineAmbientFallback {
+  opacity: 0;
+}
+
+.frameRingPreviewOnlineAmbientBackdrop,
+.frameRingPreviewOnlineAmbientSubject {
+  position: absolute;
+  display: block;
+  user-select: none;
+}
+
+.frameRingPreviewOnlineAmbientBackdrop {
+  inset: -8%;
+  width: 116%;
+  height: 116%;
+  filter: blur(28px) brightness(0.58) saturate(0.86);
+  object-fit: cover;
+  transform: scale(1.06);
+}
+
+.frameRingPreviewOnlineAmbientShade {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.frameRingPreviewOnlineAmbientSubject {
+  z-index: 2;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: 50% 50%;
+}
+
 .frameRingPreviewOnlineWebview[data-geometry-recovering='true'] {
   pointer-events: none !important;
 }
@@ -6655,11 +7315,11 @@ input:focus-visible {
   left: 50%;
   display: grid;
   width: min(
-    calc(620px * var(--frame-ring-layout-scale)),
+    calc(720px * var(--frame-ring-layout-scale)),
     calc(100vw - 180px * var(--frame-ring-layout-scale))
   );
   height: calc(54px * var(--frame-ring-layout-scale));
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   box-sizing: border-box;
   border-radius: calc(14px * var(--frame-ring-layout-scale));
   overflow: hidden;

@@ -1089,7 +1089,11 @@ function createBilibiliSearchApiUrl(
   if (!Number.isSafeInteger(timestampSeconds) || timestampSeconds <= 0) {
     throw new TypeError('A valid Bilibili WBI timestamp is required')
   }
-  if (searchType !== 'video' && searchType !== 'media_bangumi') {
+  if (
+    searchType !== 'video' &&
+    searchType !== 'media_bangumi' &&
+    searchType !== 'media_ft'
+  ) {
     throw new TypeError('An unsupported Bilibili search type was requested')
   }
 
@@ -1379,9 +1383,9 @@ function collectBangumiTags(raw) {
   return tags
 }
 
-function normalizeBilibiliBangumiSearchItem(raw = {}) {
+function normalizeBilibiliBangumiSearchItem(raw = {}, expectedType = 'media_bangumi') {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
-  if (boundedText(raw.type, 32) !== 'media_bangumi') return null
+  if (boundedText(raw.type, 32) !== expectedType) return null
   const episodeId = normalizeBangumiEpisodeId(raw)
   if (!episodeId) return null
   const canonicalUrl = createBilibiliVideoUrl({ episodeId })
@@ -1399,7 +1403,8 @@ function normalizeBilibiliBangumiSearchItem(raw = {}) {
     description: decodeHtmlText(raw.desc, 2_000),
     coverUrl: normalizeCoverUrl(raw.cover),
     thumbnailPath: null,
-    author: decodeHtmlText(raw.season_type_name, 160) || 'B站番剧',
+    author: decodeHtmlText(raw.season_type_name, 160) ||
+      (expectedType === 'media_ft' ? 'B站影视' : 'B站番剧'),
     duration:
       Number.isSafeInteger(episodeCount) && episodeCount > 0
         ? `${episodeCount} 集`
@@ -1409,7 +1414,11 @@ function normalizeBilibiliBangumiSearchItem(raw = {}) {
   }
 }
 
-function normalizeBilibiliBangumiSearchResponse(payload, limit) {
+function normalizeBilibiliBangumiSearchResponse(
+  payload,
+  limit,
+  expectedType = 'media_bangumi',
+) {
   const normalizedLimit = normalizeSearchLimit(limit)
   if (
     !payload ||
@@ -1432,7 +1441,7 @@ function normalizeBilibiliBangumiSearchResponse(payload, limit) {
   const results = []
   const seenMediaIds = new Set()
   for (const raw of payload.data.result) {
-    const descriptor = normalizeBilibiliBangumiSearchItem(raw)
+    const descriptor = normalizeBilibiliBangumiSearchItem(raw, expectedType)
     if (!descriptor || seenMediaIds.has(descriptor.mediaId)) continue
     seenMediaIds.add(descriptor.mediaId)
     results.push(descriptor)
@@ -1735,56 +1744,87 @@ function createBilibiliSessionManager({
     }
     if (
       Object.keys(request).some(
-        (key) => key !== 'query' && key !== 'limit' && key !== 'page',
+        (key) =>
+          key !== 'query' &&
+          key !== 'limit' &&
+          key !== 'page' &&
+          key !== 'searchType',
       )
     ) {
       throw new TypeError(
-        'Only a Bilibili search query, limit, and page are accepted',
+        'Only a Bilibili search query, limit, page, and search type are accepted',
       )
     }
     const query = boundedText(request.query, MAX_SEARCH_QUERY_LENGTH)
     const limit = normalizeSearchLimit(request.limit)
     const page = normalizeSearchPage(request.page)
+    const searchType = request.searchType ?? 'all'
+    if (!['all', 'video', 'bangumi', 'film', 'live'].includes(searchType)) {
+      throw new TypeError('An unsupported Bilibili search type was requested')
+    }
     if (!query) throw new TypeError('A non-empty Bilibili search query is required')
+
+    if (searchType === 'live') {
+      return {
+        query,
+        page,
+        pageSize: limit,
+        totalCount: 0,
+        hasMore: false,
+        nextPage: null,
+        results: [],
+      }
+    }
 
     // Keep a stable per-source page size so advancing the combined page never
     // skips the ordinary-video results displaced by promoted bangumi entries.
-    const bangumiPageSize =
-      limit === 1 ? 0 : Math.max(1, Math.floor(limit / 3))
-    const videoPageSize = limit - bangumiPageSize
+    const bangumiPageSize = searchType === 'all'
+      ? (limit === 1 ? 0 : Math.max(1, Math.floor(limit / 3)))
+      : (searchType === 'bangumi' || searchType === 'film' ? limit : 0)
+    const videoPageSize = searchType === 'all'
+      ? limit - bangumiPageSize
+      : (searchType === 'video' ? limit : 0)
+    const officialSearchType = searchType === 'film'
+      ? 'media_ft'
+      : 'media_bangumi'
 
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), SEARCH_REQUEST_TIMEOUT_MS)
     try {
       const mixinKey = await getWbiMixinKey(controller.signal)
-      const videoSearchTask = (async () => {
-        const searchUrl = createBilibiliSearchApiUrl(
-          query,
-          videoPageSize,
-          mixinKey,
-          Math.floor(Date.now() / 1_000),
-          'video',
-          page,
-        )
-        const payload = await fetchBoundedJson(
-          searchUrl,
-          '/x/web-interface/wbi/search/type',
-          controller.signal,
-        )
-        const results = normalizeBilibiliSearchResponse(
-          payload,
-          videoPageSize,
-        )
-        return {
-          results,
-          pagination: normalizeBilibiliSearchPagination(
-            payload,
-            page,
-            videoPageSize,
-            results.length,
-          ),
-        }
-      })()
+      const videoSearchTask = videoPageSize === 0
+        ? Promise.resolve({
+            results: [],
+            pagination: { page, totalCount: 0, numPages: 0, hasMore: false },
+          })
+        : (async () => {
+            const searchUrl = createBilibiliSearchApiUrl(
+              query,
+              videoPageSize,
+              mixinKey,
+              Math.floor(Date.now() / 1_000),
+              'video',
+              page,
+            )
+            const payload = await fetchBoundedJson(
+              searchUrl,
+              '/x/web-interface/wbi/search/type',
+              controller.signal,
+            )
+            const results = normalizeBilibiliSearchResponse(
+              payload,
+              videoPageSize,
+            )
+            return {
+              results,
+              pagination: normalizeBilibiliSearchPagination(
+                payload,
+                page,
+                videoPageSize,
+                results.length,
+              ),
+            }
+          })()
       const bangumiSearchTask = bangumiPageSize === 0
         ? Promise.resolve({
             results: [],
@@ -1796,11 +1836,12 @@ function createBilibiliSessionManager({
             },
           })
         : (async () => {
-            const searchUrl = createBilibiliBangumiSearchApiUrl(
+            const searchUrl = createBilibiliSearchApiUrl(
               query,
               bangumiPageSize,
               mixinKey,
               Math.floor(Date.now() / 1_000),
+              officialSearchType,
               page,
             )
             const payload = await fetchBoundedJson(
@@ -1811,6 +1852,7 @@ function createBilibiliSessionManager({
             const results = normalizeBilibiliBangumiSearchResponse(
               payload,
               bangumiPageSize,
+              officialSearchType,
             )
             return {
               results,

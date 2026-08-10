@@ -520,6 +520,52 @@ test('normalizes Tencent-owned series and ordinary video results only', () => {
   expect(response.nextPage).toBe(2)
 })
 
+test('filters Tencent categories from reviewed type names and tags', () => {
+  const makeItem = (id: string, typeName: string) => ({
+    doc: { dataType: 2, id },
+    videoInfo: {
+      title: `${typeName}内容`,
+      typeName,
+      playSites: [{
+        enName: 'qq',
+        totalEpisode: 1,
+        episodeInfoList: [{
+          id: 'z3171ldqt0c',
+          url: `https://v.qq.com/x/cover/${id}/z3171ldqt0c.html`,
+        }],
+      }],
+    },
+  })
+  const payload = {
+    data: {
+      areaBoxList: [{
+        itemList: [
+          makeItem('mzc0033x2b7ys57', '动漫'),
+          makeItem('mzc0033x2b7ys58', '纪录片'),
+        ],
+      }],
+      normalList: { totalNum: 2, itemList: [] },
+    },
+  }
+  const request = { query: '测试', page: 1, limit: 12 }
+  expect(normalizeTencentSearchPayload(payload, {
+    ...request,
+    searchType: 'anime',
+  }).results).toEqual([
+    expect.objectContaining({ mediaId: 'mzc0033x2b7ys57' }),
+  ])
+  expect(normalizeTencentSearchPayload(payload, {
+    ...request,
+    searchType: 'documentary',
+  }).results).toEqual([
+    expect.objectContaining({ mediaId: 'mzc0033x2b7ys58' }),
+  ])
+  expect(() => normalizeTencentSearchPayload(payload, {
+    ...request,
+    searchType: 'sports',
+  })).toThrow('search type')
+})
+
 test('isolates Tencent webviews while coexisting with other provider guards', async () => {
   const host = new EventEmitter()
   // Real Electron Session instances do not expose getPartition(). The main

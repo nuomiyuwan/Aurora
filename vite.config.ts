@@ -5,6 +5,7 @@ import react from '@vitejs/plugin-react'
 
 const require = createRequire(import.meta.url)
 const { createEmbyDevMiddleware } = require('./electron/embyDevMiddleware.cjs')
+const packageMetadata = require('./package.json') as { version: string }
 
 function embyDevBridgePlugin(): Plugin {
   return {
@@ -22,6 +23,9 @@ function embyDevBridgePlugin(): Plugin {
 // https://vite.dev/config/
 export default defineConfig({
   base: './',
+  define: {
+    __AURORA_VERSION__: JSON.stringify(packageMetadata.version),
+  },
   build: {
     chunkSizeWarningLimit: 700,
     rolldownOptions: {

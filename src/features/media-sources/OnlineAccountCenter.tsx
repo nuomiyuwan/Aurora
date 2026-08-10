@@ -45,6 +45,10 @@ const PROVIDER_MESSAGES: Readonly<
     signedIn: '官方会话已连接，播放权益由优酷实时确认',
     signedOut: '登录后可使用当前账号的清晰度与会员权益',
   },
+  douyin: {
+    signedIn: '官方会话已连接，搜索将复用当前登录状态',
+    signedOut: '登录后可正常使用抖音关键词搜索',
+  },
 }
 
 const createInitialAuthStates = (): Record<OnlineMediaProvider, AuthState> =>

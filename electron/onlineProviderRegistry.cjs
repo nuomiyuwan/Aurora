@@ -12,7 +12,7 @@ const ONLINE_PROVIDER_MANIFESTS = Object.freeze([
       'pagination',
       'account',
       'episodes',
-      'poster-reflection',
+      'player-frame-reflection',
     ]),
   }),
   Object.freeze({
@@ -27,7 +27,7 @@ const ONLINE_PROVIDER_MANIFESTS = Object.freeze([
       'search',
       'account',
       'episodes',
-      'poster-reflection',
+      'player-frame-reflection',
     ]),
   }),
   Object.freeze({
@@ -42,7 +42,7 @@ const ONLINE_PROVIDER_MANIFESTS = Object.freeze([
       'search',
       'pagination',
       'account',
-      'poster-reflection',
+      'player-frame-reflection',
     ]),
   }),
   Object.freeze({
@@ -58,7 +58,21 @@ const ONLINE_PROVIDER_MANIFESTS = Object.freeze([
       'pagination',
       'account',
       'episodes',
-      'poster-reflection',
+      'player-frame-reflection',
+    ]),
+  }),
+  Object.freeze({
+    schemaVersion: 1,
+    id: 'douyin',
+    displayName: '抖音',
+    adapterVersion: 1,
+    releaseStage: 'beta',
+    defaultEnabled: false,
+    capabilities: Object.freeze([
+      'official-playback',
+      'search',
+      'pagination',
+      'account',
     ]),
   }),
 ])
@@ -231,6 +245,9 @@ function createOnlineProviderRegistry({ adapters = {} } = {}) {
         query: request.query,
         page: request.page,
         limit: request.limit,
+        ...(request.searchType === undefined
+          ? {}
+          : { searchType: request.searchType }),
       }
       const response = await adapter.searchVideos(normalizedRequest)
       return normalizeSearchResponse(provider, response, normalizedRequest)

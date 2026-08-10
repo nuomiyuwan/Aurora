@@ -77,6 +77,8 @@ export type MediaVisualIndex = {
   frames: MediaVisualIndexFrame[]
 }
 
+export type FrameAnnotationSource = 'manual' | 'ai'
+
 export type FrameAnnotation = {
   assetId: string
   frameId: string
@@ -84,4 +86,27 @@ export type FrameAnnotation = {
   rating: number
   tags: string[]
   note: string
+  /** Missing on legacy records and is treated as manual. */
+  tagsSource?: FrameAnnotationSource
+  /** Missing on legacy records and is treated as manual. */
+  noteSource?: FrameAnnotationSource
+}
+
+export type FrameExclusionReason =
+  | 'black'
+  | 'white'
+  | 'duplicate'
+  | 'manual'
+
+/**
+ * A reversible frame-ring exclusion. The generated frame remains in its
+ * visual index so restoring an exclusion never needs to rebuild the source.
+ */
+export type FrameExclusion = {
+  assetId: string
+  sourceFingerprint: string
+  frameId: string
+  reason: FrameExclusionReason
+  duplicateOfFrameId: string | null
+  createdAt: string
 }

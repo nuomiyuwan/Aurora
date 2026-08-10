@@ -28,8 +28,11 @@ test('主进程平台注册表只分派到显式注册的适配器', async () =>
     query: '广告',
     page: 2,
     limit: 9,
+    searchType: 'official',
   })
-  expect(requests).toEqual([{ query: '广告', page: 2, limit: 9 }])
+  expect(requests).toEqual([{
+    query: '广告', page: 2, limit: 9, searchType: 'official',
+  }])
   await expect(
     registry.search({ provider: 'unknown', query: '广告' }),
   ).rejects.toThrow('registered online provider')

@@ -11,11 +11,28 @@ export type OnlineEmbeddedPlayback = {
   canonicalUrl: string
 }
 
+export type OnlineEmbeddedPlayerLayout =
+  | 'provider-default'
+  | 'portrait-contain'
+
+export function getOnlineEmbeddedPlayerLayout(
+  provider: OnlineMediaProvider,
+): OnlineEmbeddedPlayerLayout {
+  return provider === 'douyin' ? 'portrait-contain' : 'provider-default'
+}
+
+export function shouldUseOnlinePlayerAmbientFallback(
+  provider: OnlineMediaProvider,
+) {
+  return getOnlineEmbeddedPlayerLayout(provider) === 'portrait-contain'
+}
+
 const TENCENT_VIDEO_ID = /^[0-9A-Za-z]{11}$/
 const TENCENT_COVER_ID = /^[0-9A-Za-z]{11,32}$/
 const XINPIANCHANG_ARTICLE_ID = /^[1-9][0-9]{0,15}$/
 const YOUKU_SHOW_ID = /^[0-9A-Za-z_-]{6,64}$/
 const YOUKU_VIDEO_ID = /^X[0-9A-Za-z_-]{8,80}={0,2}$/
+const DOUYIN_VIDEO_ID = /^[1-9][0-9]{18}$/
 
 function parseCanonicalHttpsUrl(value: string) {
   try {
@@ -119,6 +136,25 @@ function createYoukuOfficialPlaybackUrl(playback: OnlineEmbeddedPlayback) {
     : null
 }
 
+function createDouyinOfficialPlaybackUrl(playback: OnlineEmbeddedPlayback) {
+  const mediaId = playback.mediaId.trim()
+  const parsed = parseCanonicalHttpsUrl(playback.canonicalUrl)
+  if (
+    playback.kind !== 'video' ||
+    !DOUYIN_VIDEO_ID.test(mediaId) ||
+    !parsed ||
+    parsed.hostname !== 'www.douyin.com' ||
+    parsed.pathname !== `/video/${mediaId}` ||
+    parsed.search
+  ) {
+    return null
+  }
+  const target = new URL('https://open.douyin.com/player/video')
+  target.searchParams.set('vid', mediaId)
+  target.searchParams.set('autoplay', '1')
+  return target.toString()
+}
+
 export function createOnlineOfficialPlaybackUrl(
   playback: OnlineEmbeddedPlayback,
 ) {
@@ -131,5 +167,7 @@ export function createOnlineOfficialPlaybackUrl(
       return createXinpianchangOfficialPlaybackUrl(playback)
     case 'youku':
       return createYoukuOfficialPlaybackUrl(playback)
+    case 'douyin':
+      return createDouyinOfficialPlaybackUrl(playback)
   }
 }

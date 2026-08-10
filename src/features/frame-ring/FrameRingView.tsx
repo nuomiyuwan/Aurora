@@ -1,5 +1,6 @@
 import {
   Box,
+  Check,
   ChevronDown,
   ChevronRight,
   FileText,
@@ -13,10 +14,12 @@ import {
   Plus,
   Search,
   Scissors,
+  Sparkles,
   Star,
   Tag,
   Trash2,
   Upload,
+  Undo2,
   Volume2,
   VolumeX,
   X,
@@ -59,6 +62,7 @@ import {
 import { getFrameRingVideoCrossOrigin } from './frameRingLiveReflection'
 import {
   acceptFirstFrameRingOnlineReflectionCapture,
+  createFrameRingOnlineReflectionPosterSource,
   getFrameRingOnlineReflectionSourceId,
   resolveFrameRingOnlineReflectionSource,
   type FrameRingOnlineReflectionSource,
@@ -87,12 +91,22 @@ import {
 } from './frameRingLayout'
 import type { BackgroundReflectionSurface } from '../reflection/backgroundReflectionSurfaceProtocol'
 import { requiresKnownVideoPreviewProxy } from '../videoPlaybackCompatibility'
+import {
+  getFrameRingSmartExcludedFrameIds,
+  type FrameRingAnnotationSuggestion,
+  type FrameRingSmartApplyRequest,
+  type FrameRingSmartApplyResult,
+  type FrameRingSmartScanResult,
+  type FrameRingSmartSensitivity,
+} from './frameRingSmartOrganize'
 
 export interface FrameAnnotation {
   favorite: boolean
   rating: number
   tags: string[]
   note: string
+  tagsSource?: 'manual' | 'ai'
+  noteSource?: 'manual' | 'ai'
 }
 
 export interface FrameRingExportDirectory {
@@ -168,6 +182,16 @@ export interface FrameRingViewProps {
   ) => FrameRingExportResult | Promise<FrameRingExportResult>
   onRevealSource?: (sourcePath: string) => boolean | Promise<boolean>
   onDeleteFrame?: (frameId: string) => boolean | Promise<boolean>
+  onScanSmartFrames?: (
+    sensitivity: FrameRingSmartSensitivity,
+  ) => FrameRingSmartScanResult | Promise<FrameRingSmartScanResult>
+  onAnalyzeSmartFrames?: (
+    frameIds: readonly string[],
+  ) => FrameRingAnnotationSuggestion[] | Promise<FrameRingAnnotationSuggestion[]>
+  onApplySmartOrganize?: (
+    request: FrameRingSmartApplyRequest,
+  ) => FrameRingSmartApplyResult | Promise<FrameRingSmartApplyResult>
+  onUndoSmartOrganize?: () => boolean | Promise<boolean>
   indexTask?: MediaIndexTask
   indexProgress?: number
   onBuildFrameRing?: () => boolean | Promise<boolean>
@@ -356,6 +380,10 @@ export function FrameRingView({
   onExportClip,
   onRevealSource,
   onDeleteFrame,
+  onScanSmartFrames,
+  onAnalyzeSmartFrames,
+  onApplySmartOrganize,
+  onUndoSmartOrganize,
   indexTask = 'idle',
   indexProgress,
   onBuildFrameRing,
@@ -463,6 +491,30 @@ export function FrameRingView({
   const [addExportToCurrentProject, setAddExportToCurrentProject] =
     useState(false)
   const [stillExportDialogOpen, setStillExportDialogOpen] = useState(false)
+  const [smartOrganizeDialogOpen, setSmartOrganizeDialogOpen] = useState(false)
+  const [smartOrganizeSensitivity, setSmartOrganizeSensitivity] =
+    useState<FrameRingSmartSensitivity>('conservative')
+  const [smartOrganizeStage, setSmartOrganizeStage] = useState<
+    | 'ready'
+    | 'scanning'
+    | 'review'
+    | 'analyzing'
+    | 'preview'
+    | 'applying'
+    | 'complete'
+  >('ready')
+  const [smartOrganizeScan, setSmartOrganizeScan] =
+    useState<FrameRingSmartScanResult | null>(null)
+  const [smartOrganizeSelectedFrameIds, setSmartOrganizeSelectedFrameIds] =
+    useState<Set<string>>(() => new Set())
+  const [smartOrganizeAnnotationsEnabled, setSmartOrganizeAnnotationsEnabled] =
+    useState(Boolean(onAnalyzeSmartFrames))
+  const [smartOrganizeSuggestions, setSmartOrganizeSuggestions] = useState<
+    FrameRingAnnotationSuggestion[]
+  >([])
+  const [smartOrganizeResult, setSmartOrganizeResult] =
+    useState<FrameRingSmartApplyResult | null>(null)
+  const [smartOrganizeError, setSmartOrganizeError] = useState('')
   const [stillExportDirectory, setStillExportDirectory] = useState('')
   const [stillExportFilename, setStillExportFilename] = useState('')
   const editableTagsRef = useRef<HTMLDivElement>(null)
@@ -1100,6 +1152,17 @@ export function FrameRingView({
   ])
 
   useEffect(() => {
+    setSmartOrganizeDialogOpen(false)
+    setSmartOrganizeStage('ready')
+    setSmartOrganizeScan(null)
+    setSmartOrganizeSelectedFrameIds(new Set())
+    setSmartOrganizeAnnotationsEnabled(Boolean(onAnalyzeSmartFrames))
+    setSmartOrganizeSuggestions([])
+    setSmartOrganizeResult(null)
+    setSmartOrganizeError('')
+  }, [clip.assetId, clip.id, clip.sourceUrl])
+
+  useEffect(() => {
     if (annotations) setFrameAnnotations(annotations)
   }, [annotations])
 
@@ -1120,7 +1183,10 @@ export function FrameRingView({
   }, [active])
 
   useEffect(() => {
-    if (!active) setStillExportDialogOpen(false)
+    if (!active) {
+      setStillExportDialogOpen(false)
+      setSmartOrganizeDialogOpen(false)
+    }
   }, [active])
 
   useEffect(() => {
@@ -1346,7 +1412,7 @@ export function FrameRingView({
   useEffect(() => {
     if (!interactive || onlinePlaybackMode) return
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (stillExportDialogOpen) return
+      if (stillExportDialogOpen || smartOrganizeDialogOpen) return
       if (event.altKey || event.metaKey || event.ctrlKey) return
       const target = event.target as HTMLElement | null
       if (target?.closest('input, textarea, select, button, [role="slider"], [contenteditable="true"]')) return
@@ -1380,6 +1446,7 @@ export function FrameRingView({
     onlinePlaybackMode,
     seekPlayerBy,
     settleTo,
+    smartOrganizeDialogOpen,
     stillExportDialogOpen,
     targetIndex,
     togglePlayerPlayback,
@@ -1976,6 +2043,197 @@ export function FrameRingView({
       setActionStatus('未能删除当前索引帧')
     } finally {
       setPendingDeleteFrameId(null)
+    }
+  }
+
+  function isSmartOrganizeBusy() {
+    return (
+      smartOrganizeStage === 'scanning' ||
+      smartOrganizeStage === 'analyzing' ||
+      smartOrganizeStage === 'applying'
+    )
+  }
+
+  function resetSmartOrganize() {
+    setSmartOrganizeStage('ready')
+    setSmartOrganizeScan(null)
+    setSmartOrganizeSelectedFrameIds(new Set())
+    setSmartOrganizeAnnotationsEnabled(Boolean(onAnalyzeSmartFrames))
+    setSmartOrganizeSuggestions([])
+    setSmartOrganizeResult(null)
+    setSmartOrganizeError('')
+  }
+
+  function openSmartOrganizeDialog() {
+    resetSmartOrganize()
+    setIsPlayerPlaying(false)
+    setSmartOrganizeDialogOpen(true)
+  }
+
+  function closeSmartOrganizeDialog() {
+    if (isSmartOrganizeBusy()) return
+    setSmartOrganizeDialogOpen(false)
+  }
+
+  function frameHasProtectedAnnotation(frameId: string) {
+    const annotation = frameAnnotations[frameId]
+    if (!annotation) return false
+    return Boolean(
+      annotation.favorite ||
+      annotation.rating > 0 ||
+      annotation.tagsSource === 'manual' ||
+      annotation.noteSource === 'manual' ||
+      (annotation.tagsSource !== 'ai' && annotation.tags.length > 0) ||
+      (annotation.noteSource !== 'ai' && annotation.note.trim()),
+    )
+  }
+
+  async function scanSmartFrames() {
+    if (!onScanSmartFrames) {
+      setSmartOrganizeError('当前环境暂不支持帧质量检测')
+      return
+    }
+    setSmartOrganizeStage('scanning')
+    setSmartOrganizeError('')
+    setSmartOrganizeSuggestions([])
+    setSmartOrganizeResult(null)
+    try {
+      const scan = await onScanSmartFrames(smartOrganizeSensitivity)
+      const candidateFrameIds = getFrameRingSmartExcludedFrameIds(scan)
+      setSmartOrganizeScan(scan)
+      setSmartOrganizeSelectedFrameIds(
+        new Set(
+          [...candidateFrameIds].filter(
+            (frameId) => !frameHasProtectedAnnotation(frameId),
+          ),
+        ),
+      )
+      setSmartOrganizeStage('review')
+    } catch (error) {
+      setSmartOrganizeError(
+        error instanceof Error && error.message
+          ? error.message
+          : '帧质量检测失败，请稍后重试',
+      )
+      setSmartOrganizeStage('ready')
+    }
+  }
+
+  function toggleSmartOrganizeFrame(frameId: string) {
+    setSmartOrganizeSelectedFrameIds((current) => {
+      const next = new Set(current)
+      if (next.has(frameId)) next.delete(frameId)
+      else next.add(frameId)
+      return next
+    })
+  }
+
+  function createSmartOrganizeApplyRequest(
+    suggestions: FrameRingAnnotationSuggestion[],
+  ): FrameRingSmartApplyRequest {
+    const exclusions = new Map<
+      string,
+      FrameRingSmartApplyRequest['exclusions'][number]
+    >()
+    for (const candidate of smartOrganizeScan?.blankCandidates ?? []) {
+      if (!smartOrganizeSelectedFrameIds.has(candidate.frameId)) continue
+      exclusions.set(candidate.frameId, {
+        frameId: candidate.frameId,
+        reason: candidate.kind,
+        duplicateOfFrameId: null,
+      })
+    }
+    for (const group of smartOrganizeScan?.duplicateGroups ?? []) {
+      for (const frameId of group.removeFrameIds) {
+        if (
+          !smartOrganizeSelectedFrameIds.has(frameId) ||
+          exclusions.has(frameId)
+        ) {
+          continue
+        }
+        exclusions.set(frameId, {
+          frameId,
+          reason: 'duplicate',
+          duplicateOfFrameId: group.keepFrameId,
+        })
+      }
+    }
+    return {
+      exclusions: [...exclusions.values()],
+      annotations: suggestions,
+    }
+  }
+
+  async function applySmartOrganize(
+    suggestions = smartOrganizeSuggestions,
+  ) {
+    if (!onApplySmartOrganize) {
+      setSmartOrganizeError('当前环境暂不支持应用整理结果')
+      return
+    }
+    setSmartOrganizeStage('applying')
+    setSmartOrganizeError('')
+    try {
+      const result = await onApplySmartOrganize(
+        createSmartOrganizeApplyRequest(suggestions),
+      )
+      setSmartOrganizeResult(result)
+      setSmartOrganizeStage('complete')
+      setActionStatus(
+        `智能整理完成：移除 ${result.excludedCount} 帧，更新 ${result.annotatedCount} 帧标注`,
+      )
+    } catch (error) {
+      setSmartOrganizeError(
+        error instanceof Error && error.message
+          ? error.message
+          : '应用整理结果失败，请稍后重试',
+      )
+      setSmartOrganizeStage(
+        smartOrganizeSuggestions.length > 0 ? 'preview' : 'review',
+      )
+    }
+  }
+
+  async function continueSmartOrganize() {
+    if (!smartOrganizeAnnotationsEnabled) {
+      await applySmartOrganize([])
+      return
+    }
+    if (!onAnalyzeSmartFrames) {
+      setSmartOrganizeError('尚未配置可用的视觉理解模型')
+      return
+    }
+    const retainedFrameIds = frames
+      .filter((frame) => !smartOrganizeSelectedFrameIds.has(frame.id))
+      .map((frame) => frame.id)
+    setSmartOrganizeStage('analyzing')
+    setSmartOrganizeError('')
+    try {
+      const suggestions = await onAnalyzeSmartFrames(retainedFrameIds)
+      setSmartOrganizeSuggestions(suggestions)
+      setSmartOrganizeStage('preview')
+    } catch (error) {
+      setSmartOrganizeError(
+        error instanceof Error && error.message
+          ? error.message
+          : '画面理解失败，可关闭自动标注后继续整理',
+      )
+      setSmartOrganizeStage('review')
+    }
+  }
+
+  async function undoSmartOrganize() {
+    if (!onUndoSmartOrganize) return
+    try {
+      const undone = await onUndoSmartOrganize()
+      if (!undone) {
+        setSmartOrganizeError('没有可撤销的智能整理记录')
+        return
+      }
+      setActionStatus('已撤销本次智能整理')
+      setSmartOrganizeDialogOpen(false)
+    } catch {
+      setSmartOrganizeError('撤销失败，请稍后重试')
     }
   }
 
@@ -2863,12 +3121,20 @@ export function FrameRingView({
     )
   }
 
-  const onlineReflectionSource = onlinePlaybackKey
+  const onlineReflectionCaptureSource = onlinePlaybackKey
     ? resolveFrameRingOnlineReflectionSource(
         onlineReflectionCapture,
         onlinePlaybackKey,
       )
     : null
+  const onlineReflectionPosterSource = onlinePlaybackKey
+    ? createFrameRingOnlineReflectionPosterSource(
+        onlinePlaybackKey,
+        playerFrame.thumbnail || clip.thumbnail,
+      )
+    : null
+  const onlineReflectionSource =
+    onlineReflectionCaptureSource ?? onlineReflectionPosterSource
   const onlineReflectionSourceId = onlineReflectionSource
     ? getFrameRingOnlineReflectionSourceId(onlineReflectionSource)
     : ''
@@ -2876,8 +3142,47 @@ export function FrameRingView({
     onlineReflectionSource &&
       onlineReflectionReadySourceId === onlineReflectionSourceId,
   )
+  const smartOrganizeFrameById = new Map(
+    frames.map((frame) => [frame.id, frame]),
+  )
+  const smartOrganizeCandidateMap = new Map<
+    string,
+    {
+      frameId: string
+      kind: 'black' | 'white' | 'duplicate'
+      confidence: number
+      reason: string
+      duplicateOfFrameId: string | null
+    }
+  >()
+  for (const candidate of smartOrganizeScan?.blankCandidates ?? []) {
+    smartOrganizeCandidateMap.set(candidate.frameId, {
+      frameId: candidate.frameId,
+      kind: candidate.kind,
+      confidence: candidate.confidence,
+      reason: candidate.reason,
+      duplicateOfFrameId: null,
+    })
+  }
+  for (const group of smartOrganizeScan?.duplicateGroups ?? []) {
+    for (const frameId of group.removeFrameIds) {
+      if (smartOrganizeCandidateMap.has(frameId)) continue
+      smartOrganizeCandidateMap.set(frameId, {
+        frameId,
+        kind: 'duplicate',
+        confidence: group.confidence,
+        reason: group.reason,
+        duplicateOfFrameId: group.keepFrameId,
+      })
+    }
+  }
+  const smartOrganizeCandidates = [...smartOrganizeCandidateMap.values()]
+    .sort((left, right) => (
+      (smartOrganizeFrameById.get(left.frameId)?.index ?? 0) -
+      (smartOrganizeFrameById.get(right.frameId)?.index ?? 0)
+    ))
   const reflectionCanvas = reflectionHost &&
-    (!onlinePlaybackMode || onlineReflectionReady)
+    (!onlinePlaybackMode || onlineReflectionSource)
     ? createPortal(
       <FrameRingReflectionCanvas
         active={active}
@@ -2960,8 +3265,19 @@ export function FrameRingView({
       <div
         className="frameRingInfoPortalLayer"
         data-page-active={active}
-        aria-hidden={!active || !interactive || stillExportDialogOpen || undefined}
-        inert={!active || !interactive || stillExportDialogOpen}
+        aria-hidden={
+          !active ||
+          !interactive ||
+          stillExportDialogOpen ||
+          smartOrganizeDialogOpen ||
+          undefined
+        }
+        inert={
+          !active ||
+          !interactive ||
+          stillExportDialogOpen ||
+          smartOrganizeDialogOpen
+        }
         style={frameRingCssVariables}
       >
         <div className="frameRingFloatingStage" aria-label="悬浮帧信息">
@@ -2993,15 +3309,28 @@ export function FrameRingView({
         aria-label={onlinePlaybackMode ? '在线视频操作栏' : '帧操作栏'}
         aria-hidden={
           !interactive ||
-          (!onlinePlaybackMode && (!hasFrameRing || trimMode || stillExportDialogOpen)) ||
+          (!onlinePlaybackMode && (
+            !hasFrameRing ||
+            trimMode ||
+            stillExportDialogOpen ||
+            smartOrganizeDialogOpen
+          )) ||
           undefined
         }
         inert={
           !interactive ||
-          (!onlinePlaybackMode && (!hasFrameRing || trimMode || stillExportDialogOpen))
+          (!onlinePlaybackMode && (
+            !hasFrameRing ||
+            trimMode ||
+            stillExportDialogOpen ||
+            smartOrganizeDialogOpen
+          ))
         }
         data-page-active={
-          active && (onlinePlaybackMode || (hasFrameRing && !trimMode))
+          active && (
+            onlinePlaybackMode ||
+            (hasFrameRing && !trimMode && !smartOrganizeDialogOpen)
+          )
         }
         data-camera-gesture="block"
         onPointerDown={(event) => event.stopPropagation()}
@@ -3012,7 +3341,7 @@ export function FrameRingView({
             <button
               className={onlineFavorite ? 'active' : ''}
               type="button"
-              aria-label={onlineFavorite ? '取消收藏在线视频' : '收藏在线视频'}
+              aria-label={onlineFavorite ? '取消 Aurora 收藏' : '收藏到 Aurora'}
               aria-pressed={onlineFavorite}
               disabled={!onToggleOnlineFavorite}
               onClick={onToggleOnlineFavorite}
@@ -3022,7 +3351,7 @@ export function FrameRingView({
                 fill={onlineFavorite ? 'currentColor' : 'none'}
                 strokeWidth={1.45}
               />
-              <span>{onlineFavorite ? '取消收藏' : '收藏'}</span>
+              <span>{onlineFavorite ? '取消 Aurora 收藏' : 'Aurora 收藏'}</span>
             </button>
             <button
               type="button"
@@ -3074,6 +3403,20 @@ export function FrameRingView({
             >
               <Upload size={20 * layout.uiScale} strokeWidth={1.45} />
               <span>导出</span>
+            </button>
+            <button
+              type="button"
+              aria-label="智能整理帧环"
+              disabled={
+                isDragging ||
+                isSettling ||
+                !onScanSmartFrames ||
+                !onApplySmartOrganize
+              }
+              onClick={openSmartOrganizeDialog}
+            >
+              <Sparkles size={20 * layout.uiScale} strokeWidth={1.45} />
+              <span>智能整理</span>
             </button>
           </>
         )}
@@ -3200,6 +3543,379 @@ export function FrameRingView({
     )
     : null
 
+  const smartOrganizeDialogPortal = !onlinePlaybackMode &&
+    reflectionHost &&
+    active &&
+    smartOrganizeDialogOpen
+    ? createPortal(
+      <div
+        className="overlay frameRingSmartOrganizeOverlay"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="frame-ring-smart-organize-title"
+        data-camera-gesture="block"
+        onPointerDown={(event) => {
+          event.stopPropagation()
+          if (event.target === event.currentTarget) closeSmartOrganizeDialog()
+        }}
+      >
+        <section
+          className="createPanel frameRingSmartOrganizePanel uiGlassShell"
+          data-stage={smartOrganizeStage}
+          onKeyDown={(event) => {
+            if (event.key !== 'Escape') return
+            event.preventDefault()
+            event.stopPropagation()
+            closeSmartOrganizeDialog()
+          }}
+        >
+          <button
+            className="panelClose uiGlassInteractive"
+            type="button"
+            aria-label="关闭智能整理"
+            disabled={isSmartOrganizeBusy()}
+            onClick={closeSmartOrganizeDialog}
+          >
+            <X size={17} />
+          </button>
+
+          <header className="createPanelHeader frameRingSmartOrganizeHeader">
+            <span className="sheetEyebrow">Smart Organize</span>
+            <h2 id="frame-ring-smart-organize-title">智能整理帧环</h2>
+            <p>
+              本地识别无意义与重复画面，再用已连接的视觉模型补全标签和备注。
+            </p>
+          </header>
+
+          {smartOrganizeStage === 'ready' && (
+            <>
+              <section className="frameRingSmartOrganizeSection">
+                <div className="frameRingSmartOrganizeSectionTitle">
+                  <strong>检测灵敏度</strong>
+                  <span>默认采用保守策略，优先避免误删</span>
+                </div>
+                <div
+                  className="frameRingSmartSensitivity uiGlassInset"
+                  role="radiogroup"
+                  aria-label="智能整理灵敏度"
+                >
+                  {([
+                    ['conservative', '保守'],
+                    ['balanced', '标准'],
+                    ['aggressive', '积极'],
+                  ] as const).map(([value, label]) => (
+                    <button
+                      key={value}
+                      className={smartOrganizeSensitivity === value ? 'active' : ''}
+                      type="button"
+                      role="radio"
+                      aria-checked={smartOrganizeSensitivity === value}
+                      onClick={() => setSmartOrganizeSensitivity(value)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <section className="frameRingSmartFeatureList">
+                <div className="uiGlassInset">
+                  <span className="frameRingSmartFeatureIcon">
+                    <Check size={16} strokeWidth={1.55} />
+                  </span>
+                  <span>
+                    <strong>黑白帧与重复帧</strong>
+                    <small>在本机快速检测，不调用视觉模型</small>
+                  </span>
+                  <span className="frameRingSmartFeatureState">已启用</span>
+                </div>
+                <label className="uiGlassInset">
+                  <span className="frameRingSmartFeatureIcon">
+                    <Sparkles size={16} strokeWidth={1.55} />
+                  </span>
+                  <span>
+                    <strong>自动标签与备注</strong>
+                    <small>
+                      {onAnalyzeSmartFrames
+                        ? '复用当前已连接的本地视觉模型'
+                        : '尚未连接可用的视觉模型'}
+                    </small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={smartOrganizeAnnotationsEnabled}
+                    disabled={!onAnalyzeSmartFrames}
+                    onChange={(event) =>
+                      setSmartOrganizeAnnotationsEnabled(event.currentTarget.checked)
+                    }
+                  />
+                  <span className="frameRingSmartSwitch" aria-hidden="true" />
+                </label>
+              </section>
+
+              <p className="frameRingSmartOrganizeNotice">
+                原视频不会被改动；候选帧会先交给你确认，整理后也可立即撤销。
+              </p>
+            </>
+          )}
+
+          {(smartOrganizeStage === 'scanning' ||
+            smartOrganizeStage === 'analyzing' ||
+            smartOrganizeStage === 'applying') && (
+            <section className="frameRingSmartOrganizeBusy" aria-live="polite">
+              <span className="frameRingSmartOrganizeBusyIcon">
+                <Sparkles size={25} strokeWidth={1.4} />
+              </span>
+              <strong>
+                {smartOrganizeStage === 'scanning'
+                  ? '正在检查帧环画面…'
+                  : smartOrganizeStage === 'analyzing'
+                    ? '正在理解画面并生成标注…'
+                    : '正在应用整理结果…'}
+              </strong>
+              <small>
+                {smartOrganizeStage === 'analyzing'
+                  ? `将分析 ${Math.max(0, frames.length - smartOrganizeSelectedFrameIds.size)} 帧，首次运行可能需要一些时间`
+                  : '请保持当前素材不变，完成后会自动继续'}
+              </small>
+            </section>
+          )}
+
+          {smartOrganizeStage === 'review' && (
+            <>
+              <section className="frameRingSmartSummary" aria-label="检测结果">
+                <span>
+                  <strong>{smartOrganizeScan?.blankCandidates.length ?? 0}</strong>
+                  黑白候选
+                </span>
+                <span>
+                  <strong>{smartOrganizeScan?.duplicateGroups.length ?? 0}</strong>
+                  重复组
+                </span>
+                <span>
+                  <strong>{smartOrganizeSelectedFrameIds.size}</strong>
+                  将从帧环移除
+                </span>
+              </section>
+
+              {smartOrganizeCandidates.length > 0 ? (
+                <div className="frameRingSmartCandidateList" role="list">
+                  {smartOrganizeCandidates.map((candidate) => {
+                    const frame = smartOrganizeFrameById.get(candidate.frameId)
+                    const selected = smartOrganizeSelectedFrameIds.has(candidate.frameId)
+                    const protectedAnnotation = frameHasProtectedAnnotation(candidate.frameId)
+                    return (
+                      <button
+                        key={candidate.frameId}
+                        className={`frameRingSmartCandidate uiGlassInset ${selected ? 'selected' : ''}`}
+                        type="button"
+                        role="checkbox"
+                        aria-checked={selected}
+                        onClick={() => toggleSmartOrganizeFrame(candidate.frameId)}
+                      >
+                        <span className="frameRingSmartCandidateCheck" aria-hidden="true">
+                          {selected && <Check size={13} strokeWidth={2} />}
+                        </span>
+                        {frame ? (
+                          <img src={frame.thumbnail} alt="" draggable={false} />
+                        ) : (
+                          <span className="frameRingSmartCandidatePlaceholder" />
+                        )}
+                        <span className="frameRingSmartCandidateCopy">
+                          <strong>
+                            {candidate.kind === 'black'
+                              ? '近纯黑画面'
+                              : candidate.kind === 'white'
+                                ? '近纯白画面'
+                                : '高度重复画面'}
+                            {frame ? ` · ${frame.timecode}` : ''}
+                          </strong>
+                          <small>
+                            {protectedAnnotation
+                              ? '检测到手动标注，已默认保留'
+                              : candidate.reason}
+                          </small>
+                        </span>
+                        <span className="frameRingSmartCandidateConfidence">
+                          {Math.round(candidate.confidence * 100)}%
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="frameRingSmartEmpty uiGlassInset">
+                  <Check size={22} strokeWidth={1.4} />
+                  <strong>没有发现需要清理的画面</strong>
+                  <small>仍可继续使用视觉模型补全标签与备注。</small>
+                </div>
+              )}
+
+              <label className="frameRingSmartAnnotationOption uiGlassInset">
+                <span>
+                  <strong>继续生成标签与备注</strong>
+                  <small>默认导入信息可被更新，手动逐帧修改会保留</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={smartOrganizeAnnotationsEnabled}
+                  disabled={!onAnalyzeSmartFrames}
+                  onChange={(event) =>
+                    setSmartOrganizeAnnotationsEnabled(event.currentTarget.checked)
+                  }
+                />
+                <span className="frameRingSmartSwitch" aria-hidden="true" />
+              </label>
+            </>
+          )}
+
+          {smartOrganizeStage === 'preview' && (
+            <>
+              <section className="frameRingSmartSummary" aria-label="整理预览">
+                <span>
+                  <strong>{smartOrganizeSelectedFrameIds.size}</strong>
+                  待移除
+                </span>
+                <span>
+                  <strong>{smartOrganizeSuggestions.length}</strong>
+                  待更新标注
+                </span>
+                <span>
+                  <strong>{frames.length - smartOrganizeSelectedFrameIds.size}</strong>
+                  保留帧
+                </span>
+              </section>
+              <div className="frameRingSmartSuggestionList">
+                {smartOrganizeSuggestions.slice(0, 4).map((suggestion) => {
+                  const frame = smartOrganizeFrameById.get(suggestion.frameId)
+                  return (
+                    <div key={suggestion.frameId} className="uiGlassInset">
+                      {frame && <img src={frame.thumbnail} alt="" draggable={false} />}
+                      <span>
+                        <strong>{frame?.timecode ?? '画面标注'}</strong>
+                        <small>{suggestion.note || '未生成备注'}</small>
+                        <span className="frameRingSmartSuggestionTags">
+                          {suggestion.tags.slice(0, 4).map((tag) => (
+                            <i key={tag}>{tag}</i>
+                          ))}
+                        </span>
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+              {smartOrganizeSuggestions.length > 4 && (
+                <p className="frameRingSmartOrganizeNotice">
+                  另有 {smartOrganizeSuggestions.length - 4} 帧标注将在应用后写入。
+                </p>
+              )}
+            </>
+          )}
+
+          {smartOrganizeStage === 'complete' && (
+            <section className="frameRingSmartComplete" aria-live="polite">
+              <span><Check size={26} strokeWidth={1.5} /></span>
+              <strong>帧环整理完成</strong>
+              <small>
+                已移除 {smartOrganizeResult?.excludedCount ?? 0} 帧，更新{' '}
+                {smartOrganizeResult?.annotatedCount ?? 0} 帧标签与备注。
+              </small>
+              <p>原视频保持不变，本次结果可在关闭前撤销。</p>
+            </section>
+          )}
+
+          {smartOrganizeError && (
+            <p className="frameRingSmartError" role="alert">
+              {smartOrganizeError}
+            </p>
+          )}
+
+          {smartOrganizeStage === 'ready' && (
+            <footer className="createPanelActions">
+              <button
+                className="secondaryAction uiGlassInset uiGlassInteractive"
+                type="button"
+                onClick={closeSmartOrganizeDialog}
+              >
+                取消
+              </button>
+              <button
+                className="primaryAction uiGlassInset uiGlassInteractive active"
+                type="button"
+                onClick={() => void scanSmartFrames()}
+              >
+                <Sparkles size={15} strokeWidth={1.65} />
+                开始检测
+              </button>
+            </footer>
+          )}
+
+          {smartOrganizeStage === 'review' && (
+            <footer className="createPanelActions">
+              <button
+                className="secondaryAction uiGlassInset uiGlassInteractive"
+                type="button"
+                onClick={resetSmartOrganize}
+              >
+                返回
+              </button>
+              <button
+                className="primaryAction uiGlassInset uiGlassInteractive active"
+                type="button"
+                onClick={() => void continueSmartOrganize()}
+              >
+                {smartOrganizeAnnotationsEnabled ? '理解画面' : '应用整理'}
+                <ChevronRight size={15} strokeWidth={1.65} />
+              </button>
+            </footer>
+          )}
+
+          {smartOrganizeStage === 'preview' && (
+            <footer className="createPanelActions">
+              <button
+                className="secondaryAction uiGlassInset uiGlassInteractive"
+                type="button"
+                onClick={() => setSmartOrganizeStage('review')}
+              >
+                返回
+              </button>
+              <button
+                className="primaryAction uiGlassInset uiGlassInteractive active"
+                type="button"
+                onClick={() => void applySmartOrganize()}
+              >
+                <Check size={15} strokeWidth={1.75} />
+                确认应用
+              </button>
+            </footer>
+          )}
+
+          {smartOrganizeStage === 'complete' && (
+            <footer className="createPanelActions">
+              <button
+                className="secondaryAction frameRingSmartUndo uiGlassInset uiGlassInteractive"
+                type="button"
+                disabled={!onUndoSmartOrganize}
+                onClick={() => void undoSmartOrganize()}
+              >
+                <Undo2 size={14} strokeWidth={1.55} />
+                撤销本次整理
+              </button>
+              <button
+                className="primaryAction uiGlassInset uiGlassInteractive active"
+                type="button"
+                onClick={closeSmartOrganizeDialog}
+              >
+                完成
+              </button>
+            </footer>
+          )}
+        </section>
+      </div>,
+      reflectionHost,
+    )
+    : null
+
   return (
     <>
       {reflectionCanvas}
@@ -3207,14 +3923,26 @@ export function FrameRingView({
       {infoPanelPortal}
       {bottomActionsPortal}
       {stillExportDialogPortal}
+      {smartOrganizeDialogPortal}
       {(active || hasPageBeenActive) && (
         <section
           ref={viewRef}
           className={`frameRingView ${trimMode ? 'isTrimMode' : ''}`}
           data-page-active={active}
           data-entry-intent={focusTarget?.intent}
-          aria-hidden={!active || !interactive || stillExportDialogOpen || undefined}
-          inert={!active || !interactive || stillExportDialogOpen}
+          aria-hidden={
+            !active ||
+            !interactive ||
+            stillExportDialogOpen ||
+            smartOrganizeDialogOpen ||
+            undefined
+          }
+          inert={
+            !active ||
+            !interactive ||
+            stillExportDialogOpen ||
+            smartOrganizeDialogOpen
+          }
           style={frameRingCssVariables}
           aria-label={`${clip.filename} 帧环浏览`}
         >
@@ -3259,12 +3987,12 @@ export function FrameRingView({
                 <>
                   {onlineReflectionSource && (
                     <img
-                      key={`${onlinePlaybackKey}:reflection`}
+                      key={onlineReflectionSourceId}
                       className="frameRingPreviewImage frameRingPreviewOnlineReflectionSource"
                       src={onlineReflectionSource.sourceUrl}
                       alt=""
                       aria-hidden="true"
-                      data-online-reflection-source="capture"
+                      data-online-reflection-source={onlineReflectionSource.kind}
                       onLoad={() => {
                         setOnlineReflectionReadySourceId(
                           onlineReflectionSourceId,
@@ -3280,7 +4008,7 @@ export function FrameRingView({
                     reflectionActive={
                       active &&
                       !suspended &&
-                      !onlineReflectionSource
+                      !onlineReflectionCaptureSource
                     }
                     onReflectionFrame={handleOnlineReflectionFrame}
                   />

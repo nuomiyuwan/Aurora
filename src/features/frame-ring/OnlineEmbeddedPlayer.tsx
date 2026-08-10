@@ -1,4 +1,10 @@
-import { useCallback, useLayoutEffect, useMemo, useRef } from 'react'
+import {
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import {
   getOnlineProviderManifest,
   type OnlineMediaProvider,
@@ -10,6 +16,8 @@ import {
 } from './bilibiliWebviewLifecycle'
 import {
   createOnlineOfficialPlaybackUrl,
+  getOnlineEmbeddedPlayerLayout,
+  shouldUseOnlinePlayerAmbientFallback,
   type OnlineEmbeddedPlayback,
 } from './onlineOfficialPlayback'
 
@@ -31,13 +39,34 @@ const ONLINE_PARTITIONS = {
   tencent: getOnlineProviderManifest('tencent').sessionPartition,
   xinpianchang: getOnlineProviderManifest('xinpianchang').sessionPartition,
   youku: getOnlineProviderManifest('youku').sessionPartition,
+  douyin: getOnlineProviderManifest('douyin').sessionPartition,
 } satisfies Record<OnlineMediaProvider, string>
 const CAPTURED_REFLECTION_PROVIDERS = new Set<OnlineMediaProvider>([
   'bilibili',
   'tencent',
+  'xinpianchang',
+  'youku',
 ])
 const REFLECTION_FRAME_DECODE_TIMEOUT = 2_000
+const DOUYIN_AMBIENT_FALLBACK_READY_DELAY = 450
+const DOUYIN_AMBIENT_FALLBACK_MAXIMUM_DELAY = 2_000
 const OnlineWebviewTag = 'webview' as 'div'
+
+export function createOnlineEmbeddedWebviewAttributes(
+  provider: OnlineMediaProvider,
+  playerUrl: string | null,
+) {
+  return {
+    src: playerUrl ?? 'about:blank',
+    partition: ONLINE_PARTITIONS[provider],
+    webpreferences:
+      'contextIsolation=yes,sandbox=yes,nodeIntegration=no,webSecurity=yes',
+    // React omits unknown boolean attributes when passed `true`. Electron's
+    // WebView only forwards window.open requests when this attribute is
+    // physically present, so use the explicit string form for Douyin only.
+    ...(provider === 'douyin' ? { allowpopups: 'true' as const } : {}),
+  }
+}
 
 function decodeReflectionFrame(dataUrl: string | null) {
   if (!dataUrl?.startsWith('data:image/')) {
@@ -76,7 +105,6 @@ export function OnlineEmbeddedPlayer({
 }: OnlineEmbeddedPlayerProps) {
   const webviewRef = useRef<HTMLDivElement>(null)
   const lifecycleRef = useRef<BilibiliWebviewLifecycleController | null>(null)
-  const posterReflectionKeyRef = useRef('')
   const onWebviewReadyRef = useRef(onWebviewReady)
   const onReflectionFrameRef = useRef(onReflectionFrame)
   const playerUrl = useMemo(
@@ -84,13 +112,18 @@ export function OnlineEmbeddedPlayer({
     [playback],
   )
   const desktopAvailable = Boolean(window.desktopBridge)
+  const layout = getOnlineEmbeddedPlayerLayout(playback.provider)
+  const useAmbientFallback = shouldUseOnlinePlayerAmbientFallback(
+    playback.provider,
+  )
+  const [playerVisualReady, setPlayerVisualReady] = useState(
+    !useAmbientFallback,
+  )
   const webviewAttributes = useMemo(
-    () => ({
-      src: playerUrl ?? 'about:blank',
-      partition: ONLINE_PARTITIONS[playback.provider],
-      webpreferences:
-        'contextIsolation=yes,sandbox=yes,nodeIntegration=no,webSecurity=yes',
-    }),
+    () => createOnlineEmbeddedWebviewAttributes(
+      playback.provider,
+      playerUrl,
+    ),
     [playback.provider, playerUrl],
   )
 
@@ -101,17 +134,31 @@ export function OnlineEmbeddedPlayer({
   const captureReflectionFrame = useCallback(async () => {
     if (!CAPTURED_REFLECTION_PROVIDERS.has(playback.provider)) return null
     const bridge = window.desktopBridge
-    const dataUrl = playback.provider === 'bilibili'
-      ? await bridge?.captureBilibiliEmbeddedFrame?.({
-          kind: playback.kind,
-          mediaId: playback.mediaId,
-        })
-      : playback.provider === 'tencent'
-        ? await bridge?.captureTencentEmbeddedFrame?.({
-            kind: playback.kind,
-            mediaId: playback.mediaId,
-          })
-        : null
+    let dataUrl: string | null | undefined = null
+    if (playback.provider === 'bilibili') {
+      dataUrl = await bridge?.captureBilibiliEmbeddedFrame?.({
+        kind: playback.kind,
+        mediaId: playback.mediaId,
+      })
+    } else if (playback.provider === 'tencent') {
+      dataUrl = await bridge?.captureTencentEmbeddedFrame?.({
+        kind: playback.kind,
+        mediaId: playback.mediaId,
+      })
+    } else if (
+      playback.provider === 'xinpianchang' &&
+      playback.kind === 'video'
+    ) {
+      dataUrl = await bridge?.captureXinpianchangEmbeddedFrame?.({
+        kind: 'video',
+        mediaId: playback.mediaId,
+      })
+    } else if (playback.provider === 'youku') {
+      dataUrl = await bridge?.captureYoukuEmbeddedFrame?.({
+        kind: playback.kind,
+        mediaId: playback.mediaId,
+      })
+    }
     return decodeReflectionFrame(dataUrl ?? null)
   }, [playback.kind, playback.mediaId, playback.provider])
 
@@ -123,6 +170,45 @@ export function OnlineEmbeddedPlayer({
   useLayoutEffect(() => {
     const webview = webviewRef.current as BilibiliWebviewElement | null
     if (!webview) return
+    let readyTimer: number | null = null
+    let maximumTimer: number | null = null
+    const clearReadyTimer = () => {
+      if (readyTimer === null) return
+      window.clearTimeout(readyTimer)
+      readyTimer = null
+    }
+    const showAmbientFallback = () => {
+      if (!useAmbientFallback) return
+      clearReadyTimer()
+      setPlayerVisualReady(false)
+    }
+    const revealOfficialPlayer = (delay = 0) => {
+      if (!useAmbientFallback) return
+      clearReadyTimer()
+      readyTimer = window.setTimeout(() => {
+        readyTimer = null
+        setPlayerVisualReady(true)
+      }, delay)
+    }
+    const handlePlayerReady = () => {
+      revealOfficialPlayer(DOUYIN_AMBIENT_FALLBACK_READY_DELAY)
+    }
+    const handlePlayerFailure = () => {
+      revealOfficialPlayer(0)
+    }
+    if (useAmbientFallback) {
+      showAmbientFallback()
+      webview.addEventListener('did-start-loading', showAmbientFallback)
+      webview.addEventListener('dom-ready', handlePlayerReady)
+      webview.addEventListener('did-stop-loading', handlePlayerReady)
+      webview.addEventListener('did-fail-load', handlePlayerFailure)
+      maximumTimer = window.setTimeout(() => {
+        maximumTimer = null
+        setPlayerVisualReady(true)
+      }, DOUYIN_AMBIENT_FALLBACK_MAXIMUM_DELAY)
+    } else {
+      setPlayerVisualReady(true)
+    }
     const lifecycle = installBilibiliWebviewLifecycle(webview, {
       onReady: (readyWebview) => onWebviewReadyRef.current?.(readyWebview),
       active: false,
@@ -130,40 +216,16 @@ export function OnlineEmbeddedPlayer({
     })
     lifecycleRef.current = lifecycle
     return () => {
+      clearReadyTimer()
+      if (maximumTimer !== null) window.clearTimeout(maximumTimer)
+      webview.removeEventListener('did-start-loading', showAmbientFallback)
+      webview.removeEventListener('dom-ready', handlePlayerReady)
+      webview.removeEventListener('did-stop-loading', handlePlayerReady)
+      webview.removeEventListener('did-fail-load', handlePlayerFailure)
       lifecycle.dispose()
       if (lifecycleRef.current === lifecycle) lifecycleRef.current = null
     }
-  }, [playerUrl])
-
-  useLayoutEffect(() => {
-    if (CAPTURED_REFLECTION_PROVIDERS.has(playback.provider)) return
-    const reflectionKey = [
-      playback.provider,
-      playback.kind,
-      playback.mediaId,
-      poster,
-    ].join(':')
-    if (
-      !active ||
-      !reflectionActive ||
-      !poster ||
-      !onReflectionFrame ||
-      posterReflectionKeyRef.current === reflectionKey
-    ) {
-      return
-    }
-    posterReflectionKeyRef.current = reflectionKey
-    publishReflectionFrame(poster)
-  }, [
-    active,
-    onReflectionFrame,
-    playback.kind,
-    playback.mediaId,
-    playback.provider,
-    poster,
-    publishReflectionFrame,
-    reflectionActive,
-  ])
+  }, [active, playerUrl, useAmbientFallback])
 
   useLayoutEffect(() => {
     if (!CAPTURED_REFLECTION_PROVIDERS.has(playback.provider)) return
@@ -186,14 +248,40 @@ export function OnlineEmbeddedPlayer({
 
   const providerLabel = getOnlineProviderManifest(playback.provider).displayName
   return (
-    <span className="frameRingPreviewOnlinePlayer" data-camera-gesture="block">
+    <span
+      className="frameRingPreviewOnlinePlayer"
+      data-camera-gesture="block"
+      data-online-player-layout={layout}
+      data-online-player-ready={playerVisualReady ? 'true' : 'false'}
+    >
       {active && desktopAvailable && playerUrl ? (
-        <OnlineWebviewTag
-          ref={webviewRef}
-          key={`${playback.provider}:${playback.kind}:${playback.mediaId}`}
-          className="frameRingPreviewOnlineWebview"
-          {...webviewAttributes}
-        />
+        <>
+          <OnlineWebviewTag
+            ref={webviewRef}
+            key={`${playback.provider}:${playback.kind}:${playback.mediaId}`}
+            className="frameRingPreviewOnlineWebview"
+            data-online-player-layout={layout}
+            {...webviewAttributes}
+          />
+          {useAmbientFallback && poster && (
+            <span
+              className="frameRingPreviewOnlineAmbientFallback"
+              aria-hidden="true"
+            >
+              <img
+                className="frameRingPreviewOnlineAmbientBackdrop"
+                src={poster}
+                alt=""
+              />
+              <span className="frameRingPreviewOnlineAmbientShade" />
+              <img
+                className="frameRingPreviewOnlineAmbientSubject"
+                src={poster}
+                alt=""
+              />
+            </span>
+          )}
+        </>
       ) : (
         <>
           <img src={poster} alt="" />

@@ -3,6 +3,7 @@ export const ONLINE_MEDIA_PROVIDER_IDS = [
   'tencent',
   'xinpianchang',
   'youku',
+  'douyin',
 ] as const
 
 export type OnlineMediaProvider = (typeof ONLINE_MEDIA_PROVIDER_IDS)[number]
@@ -13,9 +14,28 @@ export type OnlineProviderCapability =
   | 'pagination'
   | 'account'
   | 'episodes'
-  | 'poster-reflection'
+  | 'player-frame-reflection'
 
 export type OnlineProviderReleaseStage = 'stable' | 'beta'
+
+export type OnlineProviderSearchType =
+  | 'all'
+  | 'kids'
+  | 'documentary'
+  | 'anime'
+  | 'variety'
+  | 'tv'
+  | 'video'
+  | 'bangumi'
+  | 'film'
+  | 'live'
+  | 'official'
+  | 'user'
+
+export type OnlineProviderSearchTypeOption = {
+  value: OnlineProviderSearchType
+  label: string
+}
 
 export type OnlineProviderManifest = {
   schemaVersion: 1
@@ -28,6 +48,7 @@ export type OnlineProviderManifest = {
   defaultEnabled: boolean
   capabilities: readonly OnlineProviderCapability[]
   sessionPartition: string
+  searchTypeOptions: readonly OnlineProviderSearchTypeOption[]
 }
 
 export const ONLINE_PROVIDER_MANIFESTS: Readonly<
@@ -48,9 +69,16 @@ export const ONLINE_PROVIDER_MANIFESTS: Readonly<
       'pagination',
       'account',
       'episodes',
-      'poster-reflection',
+      'player-frame-reflection',
     ],
     sessionPartition: 'persist:aurora-bilibili-v1',
+    searchTypeOptions: [
+      { value: 'all', label: '综合' },
+      { value: 'video', label: '视频' },
+      { value: 'bangumi', label: '番剧' },
+      { value: 'film', label: '影视' },
+      { value: 'live', label: '直播' },
+    ],
   },
   tencent: {
     schemaVersion: 1,
@@ -66,9 +94,17 @@ export const ONLINE_PROVIDER_MANIFESTS: Readonly<
       'search',
       'account',
       'episodes',
-      'poster-reflection',
+      'player-frame-reflection',
     ],
     sessionPartition: 'persist:aurora-tencent-v1',
+    searchTypeOptions: [
+      { value: 'all', label: '全部' },
+      { value: 'kids', label: '少儿' },
+      { value: 'documentary', label: '纪录片' },
+      { value: 'anime', label: '动漫' },
+      { value: 'variety', label: '综艺' },
+      { value: 'tv', label: '电视剧' },
+    ],
   },
   xinpianchang: {
     schemaVersion: 1,
@@ -84,9 +120,10 @@ export const ONLINE_PROVIDER_MANIFESTS: Readonly<
       'search',
       'pagination',
       'account',
-      'poster-reflection',
+      'player-frame-reflection',
     ],
     sessionPartition: 'persist:aurora-online-xinpianchang-v1',
+    searchTypeOptions: [],
   },
   youku: {
     schemaVersion: 1,
@@ -100,11 +137,35 @@ export const ONLINE_PROVIDER_MANIFESTS: Readonly<
     capabilities: [
       'official-playback',
       'search',
+      'pagination',
       'account',
       'episodes',
-      'poster-reflection',
+      'player-frame-reflection',
     ],
     sessionPartition: 'persist:aurora-online-youku-v1',
+    searchTypeOptions: [
+      { value: 'all', label: '全部' },
+      { value: 'official', label: '影视' },
+      { value: 'user', label: '用户' },
+    ],
+  },
+  douyin: {
+    schemaVersion: 1,
+    id: 'douyin',
+    displayName: '抖音',
+    sourceLabel: '抖音',
+    shortLabel: 'D',
+    codecLabel: 'Douyin',
+    releaseStage: 'beta',
+    defaultEnabled: false,
+    capabilities: [
+      'official-playback',
+      'search',
+      'pagination',
+      'account',
+    ],
+    sessionPartition: 'persist:aurora-online-douyin-v1',
+    searchTypeOptions: [],
   },
 }
 
@@ -137,6 +198,21 @@ export const getOnlineProviderManifest = (provider: OnlineMediaProvider) =>
 
 export const getOnlineProviderLabel = (provider: OnlineMediaProvider) =>
   getOnlineProviderManifest(provider).displayName
+
+export const getOnlineProviderSearchTypeOptions = (
+  provider: OnlineMediaProvider,
+) => getOnlineProviderManifest(provider).searchTypeOptions
+
+export const normalizeOnlineProviderSearchType = (
+  provider: OnlineMediaProvider,
+  value: unknown,
+): OnlineProviderSearchType | null => {
+  const options = getOnlineProviderSearchTypeOptions(provider)
+  if (options.length === 0) return null
+  return options.some((option) => option.value === value)
+    ? value as OnlineProviderSearchType
+    : options[0].value
+}
 
 export const onlineProviderHasCapability = (
   provider: OnlineMediaProvider,

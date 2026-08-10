@@ -215,7 +215,23 @@ function rationalSeconds(timestamp, timeBase, label) {
   return seconds
 }
 
-function validatePrintedTime(value, exactSeconds, timeBase, label) {
+function printedTimeResolutionSeconds(value, printedSeconds) {
+  if (
+    typeof value !== 'string' ||
+    !/^[+-]?(?:\d+)(?:\.\d*)?(?:[eE][+-]?\d+)?$/.test(value)
+  ) {
+    return null
+  }
+
+  // FFmpeg's stats formatter uses `%g`: six significant digits, with trailing
+  // zeroes omitted. Derive precision from magnitude rather than the visible
+  // decimal places, otherwise a valid value such as `0.2` would incorrectly
+  // be treated as precise to only one decimal place.
+  if (printedSeconds === 0) return 1e-6
+  return 10 ** (Math.floor(Math.log10(Math.abs(printedSeconds))) - 5)
+}
+
+function validatePrintedTime(value, exactSeconds, _timeBase, label) {
   const printedSeconds = Number(value)
   if (!Number.isFinite(printedSeconds)) {
     throw mediaError(
@@ -223,13 +239,20 @@ function validatePrintedTime(value, exactSeconds, timeBase, label) {
       `${label} is missing or invalid`,
     )
   }
-  const timeBaseSeconds =
-    Number(timeBase.numerator) / Number(timeBase.denominator)
-  const tolerance = Math.max(
-    1e-6,
-    Math.abs(exactSeconds) * 2e-6,
-    timeBaseSeconds,
-  )
+  const resolution = printedTimeResolutionSeconds(value, printedSeconds)
+  if (!Number.isFinite(resolution) || resolution <= 0) {
+    throw mediaError(
+      'MEDIA_INDEX_TIMESTAMPS_INVALID',
+      `${label} has an unsupported numeric format`,
+    )
+  }
+  // `{t}` and `{ti}` are rounded decimal diagnostics. PTS + time base remain
+  // authoritative; validate the printed value at its actual display precision
+  // so six-significant-digit output such as 11.0777 is not rejected merely
+  // because the exact PTS represents 11.077733333… seconds.
+  const tolerance =
+    resolution * 0.500001 +
+    Math.max(1, Math.abs(exactSeconds)) * Number.EPSILON * 8
   if (Math.abs(printedSeconds - exactSeconds) > tolerance) {
     throw mediaError(
       'MEDIA_INDEX_TIMESTAMPS_INVALID',
@@ -2242,6 +2265,7 @@ module.exports = {
     createIndexScaleFilter,
     createSceneChangeParser,
     mergeIndexFrameEntries,
+    readFrameTimestampStats,
   },
   MEDIA_URL_SCHEME,
   createMediaPipeline,

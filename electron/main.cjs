@@ -10,6 +10,7 @@ const {
   session,
   shell,
 } = require('electron')
+const { autoUpdater } = require('electron-updater')
 const fs = require('fs')
 const path = require('path')
 const { Readable } = require('stream')
@@ -28,6 +29,9 @@ const {
 } = require('./aiVisualSearch.cjs')
 const { createAiLocalModelDetector } = require('./aiLocalModels.cjs')
 const { createAiContactSheetComposer } = require('./aiContactSheet.cjs')
+const {
+  createFrameIntelligenceEngine,
+} = require('./frameIntelligence.cjs')
 const { inspectMediaFile } = require('./mediaProbe.cjs')
 const {
   MEDIA_URL_SCHEME,
@@ -39,6 +43,7 @@ const { createVisualAssetStore } = require('./visualAssets.cjs')
 const { createModelAssetManager } = require('./modelAssets.cjs')
 const { createWindowRevealGate } = require('./windowRevealGate.cjs')
 const { createExternalVideoOpenBroker } = require('./externalVideoOpen.cjs')
+const { createAppUpdateManager } = require('./appUpdater.cjs')
 const {
   createOnlineProviderRegistry,
 } = require('./onlineProviderRegistry.cjs')
@@ -59,14 +64,21 @@ const {
 } = require('./tencentVideoSession.cjs')
 const {
   XINPIANCHANG_PARTITION,
+  captureXinpianchangEmbeddedFrame,
   createXinpianchangSessionManager,
   installXinpianchangPlayerWebviewGuard,
 } = require('./xinpianchangSession.cjs')
 const {
   YOUKU_PARTITION,
+  captureYoukuEmbeddedFrame,
   createYoukuSessionManager,
   installYoukuPlayerWebviewGuard,
 } = require('./youkuSession.cjs')
+const {
+  DOUYIN_PARTITION,
+  createDouyinSessionManager,
+  installDouyinPlayerWebviewGuard,
+} = require('./douyinSession.cjs')
 
 const isDev = !app.isPackaged
 const STARTUP_VISUAL_READY_CHANNEL = 'startup:visual-ready'
@@ -83,6 +95,10 @@ const BILIBILI_SELECTION_CHANNEL = 'bilibili:selection'
 const BILIBILI_AUTH_STATE_CHANNEL = 'bilibili:auth-state'
 const TENCENT_VIDEO_AUTH_STATE_CHANNEL = 'tencent:auth-state'
 const ONLINE_PROVIDER_AUTH_STATE_CHANNEL = 'online-provider:auth-state'
+const APP_UPDATE_STATE_CHANNEL = 'app-update:state'
+const APP_UPDATE_GET_STATE_CHANNEL = 'app-update:get-state'
+const APP_UPDATE_CHECK_CHANNEL = 'app-update:check'
+const APP_UPDATE_INSTALL_CHANNEL = 'app-update:download-and-install'
 const WINDOW_REVEAL_FALLBACK_MS = 8_000
 let saveQueue = Promise.resolve()
 let appDataSyncEpoch = 0
@@ -96,7 +112,9 @@ let bilibiliSessionManager = null
 let tencentVideoSessionManager = null
 let xinpianchangSessionManager = null
 let youkuSessionManager = null
+let douyinSessionManager = null
 let onlineProviderRegistry = null
+let appUpdateManager = null
 let mainWindow = null
 let createWindowPromise = null
 let windowCreationReady = false
@@ -393,6 +411,7 @@ const aiVisualSearchService = createAiVisualSearchService({
   },
 })
 const aiLocalModelDetector = createAiLocalModelDetector()
+const frameIntelligenceEngine = createFrameIntelligenceEngine()
 
 function embyIpcHandler(operation) {
   return async (_event, request) => {
@@ -605,6 +624,9 @@ async function createWindow() {
     autoHideMenuBar: process.platform === 'win32',
     frame: process.platform !== 'win32',
     thickFrame: process.platform === 'win32',
+    roundedCorners: true,
+    hasShadow: true,
+    transparent: false,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
       contextIsolation: true,
@@ -620,6 +642,7 @@ async function createWindow() {
       TENCENT_VIDEO_PARTITION,
       XINPIANCHANG_PARTITION,
       YOUKU_PARTITION,
+      DOUYIN_PARTITION,
     ])
   const disposeBilibiliPlayerWebviewGuard =
     installBilibiliPlayerWebviewGuard(
@@ -640,6 +663,11 @@ async function createWindow() {
     installYoukuPlayerWebviewGuard(
       windowInstance.webContents,
       session.fromPartition(YOUKU_PARTITION),
+    )
+  const disposeDouyinPlayerWebviewGuard =
+    installDouyinPlayerWebviewGuard(
+      windowInstance.webContents,
+      session.fromPartition(DOUYIN_PARTITION),
     )
 
   const notifyMaximizedState = () => {
@@ -703,6 +731,7 @@ async function createWindow() {
   windowInstance.once('closed', disposeTencentPlayerWebviewGuard)
   windowInstance.once('closed', disposeXinpianchangPlayerWebviewGuard)
   windowInstance.once('closed', disposeYoukuPlayerWebviewGuard)
+  windowInstance.once('closed', disposeDouyinPlayerWebviewGuard)
   windowInstance.once('closed', () => {
     externalVideoOpenBroker.clearConsumer()
     onlineProviderRegistry?.closeWindows()
@@ -736,6 +765,36 @@ function ensureMainWindow() {
 
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
   if (process.platform === 'win32') Menu.setApplicationMenu(null)
+
+  appUpdateManager = createAppUpdateManager({
+    updater: autoUpdater,
+    currentVersion: app.getVersion(),
+    packaged: app.isPackaged,
+    platform: process.platform,
+    feedConfiguration: {
+      provider: 'github',
+      owner: 'nuomiyuwan',
+      repo: 'Aurora',
+    },
+    onStateChange: (state) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(APP_UPDATE_STATE_CHANNEL, state)
+      }
+    },
+  })
+
+  ipcMain.handle(APP_UPDATE_GET_STATE_CHANNEL, (event) => {
+    requireMainWindowSender(event)
+    return appUpdateManager.getState()
+  })
+  ipcMain.handle(APP_UPDATE_CHECK_CHANNEL, (event) => {
+    requireMainWindowSender(event)
+    return appUpdateManager.checkForUpdates({ source: 'manual' })
+  })
+  ipcMain.handle(APP_UPDATE_INSTALL_CHANNEL, (event) => {
+    requireMainWindowSender(event)
+    return appUpdateManager.downloadAndInstall()
+  })
 
   ipcMain.on(WINDOW_MINIMIZE_CHANNEL, (event) => {
     getWindowsControlTarget(event)?.minimize()
@@ -857,12 +916,31 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
       }
     },
   })
+  douyinSessionManager = createDouyinSessionManager({
+    BrowserWindow,
+    sessionModule: session,
+    getParentWindow: () => mainWindow,
+    cacheDirectory: path.join(
+      app.getPath('userData'),
+      'douyin-cache',
+      'thumbnails',
+    ),
+    onAuthStateChange: (state) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(ONLINE_PROVIDER_AUTH_STATE_CHANNEL, {
+          provider: 'douyin',
+          state: { supported: true, signedIn: Boolean(state?.signedIn) },
+        })
+      }
+    },
+  })
   onlineProviderRegistry = createOnlineProviderRegistry({
     adapters: {
       bilibili: bilibiliSessionManager,
       tencent: tencentVideoSessionManager,
       xinpianchang: xinpianchangSessionManager,
       youku: youkuSessionManager,
+      douyin: douyinSessionManager,
     },
   })
 
@@ -930,6 +1008,14 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   ipcMain.handle('tencent:embedded:capture', async (event, request) => {
     requireMainWindowSender(event)
     return captureTencentEmbeddedFrame(event.sender, request)
+  })
+  ipcMain.handle('xinpianchang:embedded:capture', async (event, request) => {
+    requireMainWindowSender(event)
+    return captureXinpianchangEmbeddedFrame(event.sender, request)
+  })
+  ipcMain.handle('youku:embedded:capture', async (event, request) => {
+    requireMainWindowSender(event)
+    return captureYoukuEmbeddedFrame(event.sender, request)
   })
 
   ipcMain.on(EXTERNAL_VIDEO_RENDERER_READY_CHANNEL, (event) => {
@@ -1064,6 +1150,10 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
 
   ipcMain.handle('media-index:build', async (_event, request) => {
     return mediaPipeline.buildVisualIndex(request)
+  })
+
+  ipcMain.handle('frame-intelligence:analyze-quality', async (_event, request) => {
+    return frameIntelligenceEngine.analyzeFrames(request)
   })
 
   ipcMain.handle('media-preview:ensure', async (_event, request) => {
@@ -1242,6 +1332,12 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     'ai:visual-search:search',
     aiVisualSearchIpcHandler((request) => aiVisualSearchService.search(request)),
   )
+  ipcMain.handle(
+    'ai:visual-search:analyze-frames',
+    aiVisualSearchIpcHandler((request) =>
+      aiVisualSearchService.analyzeFrames(request),
+    ),
+  )
 
   ipcMain.handle(
     'emby:connection:get',
@@ -1274,6 +1370,12 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
 
   windowCreationReady = true
   void ensureMainWindow()
+    .then(() => {
+      appUpdateManager?.scheduleAutomaticCheck()
+    })
+    .catch((error) => {
+      console.warn('[Aurora updater] Unable to schedule automatic check', error)
+    })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -1291,10 +1393,13 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   mediaPipeline?.cancelAll()
+  appUpdateManager?.dispose()
+  appUpdateManager = null
   onlineProviderRegistry?.dispose()
   onlineProviderRegistry = null
   bilibiliSessionManager = null
   tencentVideoSessionManager = null
   xinpianchangSessionManager = null
   youkuSessionManager = null
+  douyinSessionManager = null
 })

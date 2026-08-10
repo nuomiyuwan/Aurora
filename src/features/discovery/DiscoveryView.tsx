@@ -26,9 +26,12 @@ import { resolveDocumentAssetUrl } from '../../documentAssetUrl'
 import {
   ONLINE_MEDIA_PROVIDER_IDS,
   getOnlineProviderLabel,
+  getOnlineProviderSearchTypeOptions,
   isOnlineMediaProvider,
+  normalizeOnlineProviderSearchType,
   onlineProviderHasCapability,
   type OnlineMediaProvider,
+  type OnlineProviderSearchType,
 } from '../../data/onlineProviderRegistry'
 import {
   readWheelDragSample,
@@ -75,6 +78,7 @@ import {
   type DiscoveryBilibiliSearchPage,
   type DiscoveryBilibiliSearchRequest,
 } from './bilibiliDiscoveryPagination'
+import { getOnlineSearchFailureStatus } from './onlineSearchFailureStatus'
 
 type DiscoverySourceFilter = 'all' | Exclude<DiscoverySource, 'nas'>
 type DiscoveryKindFilter = 'all' | DiscoveryResultKind
@@ -103,12 +107,21 @@ type DiscoverySnakeTransition = {
 type DiscoveryOnlinePaginationState = {
   searchSequence: number
   query: string
+  searchType: OnlineProviderSearchType | null
   nextPage: number | null
   totalCount: number | null
   hasMore: boolean
   loading: boolean
   autoLoadBlocked: boolean
   loadMoreError: string | null
+}
+type DiscoveryOnlineRetryMode = 'manual' | 'recovery'
+type DiscoveryOnlineRecoveryState = {
+  attempts: number
+  timer: number | null
+  searchSequence: number
+  query: string
+  nextPage: number
 }
 const DEFAULT_QUERY = ''
 const SEARCH_DELAY_MS = 320
@@ -143,11 +156,17 @@ const DISCOVERY_RESULT_CORRIDOR_ENABLED = false
 const DISCOVERY_RESULT_LAYOUT_REVISION = 5
 const DISCOVERY_IMAGE_PRELOAD_TIMEOUT_MS = 6_000
 const DISCOVERY_PRELOAD_CACHE_LIMIT = 96
+const DOUYIN_DISCOVERY_RECOVERY_DELAYS_MS = [700, 1_600, 3_600] as const
+// The main-process Douyin collector has its own 40 second deadline. Keep a
+// small IPC grace period here so a lost renderer/main-process reply can never
+// leave Discovery's pagination state permanently marked as loading.
+const DOUYIN_DISCOVERY_PAGE_REQUEST_TIMEOUT_MS = 45_000
 const discoveryImagePreloadCache = new Map<string, Promise<boolean>>()
 
 const EMPTY_ONLINE_PAGINATION: DiscoveryOnlinePaginationState = {
   searchSequence: 0,
   query: '',
+  searchType: null,
   nextPage: null,
   totalCount: null,
   hasMore: false,
@@ -1151,7 +1170,7 @@ const clearDiscoveryCorridorPose = (element: HTMLDivElement) => {
 interface FilterSelectProps<T extends string> {
   label: string
   value: T
-  options: Record<T, string>
+  options: Readonly<Partial<Record<T, string>>>
   onChange: (value: T) => void
 }
 
@@ -1165,9 +1184,17 @@ export type DiscoveryAiSearchRequest = {
 
 export type DiscoveryOnlineSearchRequest = DiscoveryBilibiliSearchRequest & {
   provider: OnlineMediaProvider
+  searchType?: OnlineProviderSearchType
 }
 
 export type DiscoveryOnlineSearchPage = DiscoveryBilibiliSearchPage
+
+export type DiscoveryAiCoverage = {
+  totalLocalVideos: number
+  searchableLocalVideos: number
+  thumbnailVideos: number
+  visualIndexVideos: number
+}
 
 export interface DiscoveryViewProps {
   active: boolean
@@ -1189,6 +1216,7 @@ export interface DiscoveryViewProps {
   onAiSearch?: (
     request: DiscoveryAiSearchRequest,
   ) => Promise<readonly DiscoveryResult[]>
+  aiCoverage?: DiscoveryAiCoverage
   enabledOnlineProviders?: readonly OnlineMediaProvider[]
   onOnlineSearch?: (
     request: DiscoveryOnlineSearchRequest,
@@ -1244,6 +1272,7 @@ export function DiscoveryView({
   onAiSearchModeChange,
   onAiSearchSetupRequired,
   onAiSearch,
+  aiCoverage,
   enabledOnlineProviders = ['bilibili', 'tencent'],
   onOnlineSearch,
   onBilibiliSearch,
@@ -1258,6 +1287,8 @@ export function DiscoveryView({
   const [committedQuery, setCommittedQuery] = useState(DEFAULT_QUERY)
   const [sourceFilter, setSourceFilter] = useState<DiscoverySourceFilter>('all')
   const [kindFilter, setKindFilter] = useState<DiscoveryKindFilter>('all')
+  const [providerSearchType, setProviderSearchType] =
+    useState<OnlineProviderSearchType>('all')
   const [resolutionFilter, setResolutionFilter] =
     useState<DiscoveryResolutionFilter>('all')
   const [selectedId, setSelectedId] = useState('')
@@ -1310,8 +1341,14 @@ export function DiscoveryView({
   const refreshAfterEmbyConnectionRef = useRef<() => void>(() => undefined)
   const refreshAfterLocalDataChangeRef = useRef<() => void>(() => undefined)
   const loadMoreOnlineResultsRef = useRef<
-    (provider: OnlineMediaProvider, manualRetry?: boolean) => void
+    (
+      provider: OnlineMediaProvider,
+      retryMode?: DiscoveryOnlineRetryMode,
+    ) => void
   >(() => undefined)
+  const onlinePaginationRecoveryRef = useRef(
+    new Map<OnlineMediaProvider, DiscoveryOnlineRecoveryState>(),
+  )
   const previousLocalResultsRef = useRef(localResults)
   const localResultsDirtyRef = useRef(false)
   const hoverExitTimerRef = useRef<number | null>(null)
@@ -1381,6 +1418,68 @@ export function DiscoveryView({
     () => new Set(enabledProviderList),
     [enabledProviderList],
   )
+  const clearOnlinePaginationRecovery = (
+    provider?: OnlineMediaProvider,
+  ) => {
+    const recoveries = onlinePaginationRecoveryRef.current
+    const clearRecovery = (recovery: DiscoveryOnlineRecoveryState) => {
+      if (recovery.timer !== null) window.clearTimeout(recovery.timer)
+    }
+    if (provider) {
+      const recovery = recoveries.get(provider)
+      if (recovery) clearRecovery(recovery)
+      recoveries.delete(provider)
+      return
+    }
+    recoveries.forEach(clearRecovery)
+    recoveries.clear()
+  }
+  const scheduleDouyinPaginationRecovery = ({
+    pagination,
+  }: {
+    pagination: DiscoveryOnlinePaginationState
+  }) => {
+    if (pagination.nextPage === null) return null
+    const provider: OnlineMediaProvider = 'douyin'
+    const current = onlinePaginationRecoveryRef.current.get(provider)
+    const samePage =
+      current?.searchSequence === pagination.searchSequence &&
+      current.query === pagination.query &&
+      current.nextPage === pagination.nextPage
+    const completedAttempts = samePage ? current.attempts : 0
+    const delay = DOUYIN_DISCOVERY_RECOVERY_DELAYS_MS[completedAttempts]
+    if (delay === undefined) return null
+    if (current?.timer !== null && current?.timer !== undefined) {
+      window.clearTimeout(current.timer)
+    }
+    const attempts = completedAttempts + 1
+    const recovery: DiscoveryOnlineRecoveryState = {
+      attempts,
+      timer: null,
+      searchSequence: pagination.searchSequence,
+      query: pagination.query,
+      nextPage: pagination.nextPage,
+    }
+    const timer = window.setTimeout(() => {
+      const scheduled = onlinePaginationRecoveryRef.current.get(provider)
+      if (scheduled?.timer !== timer) return
+      scheduled.timer = null
+      const latest = onlinePaginationRef.current[provider]
+      if (
+        searchSequenceRef.current !== recovery.searchSequence ||
+        latest.searchSequence !== recovery.searchSequence ||
+        latest.query !== recovery.query ||
+        latest.nextPage !== recovery.nextPage
+      ) {
+        clearOnlinePaginationRecovery(provider)
+        return
+      }
+      loadMoreOnlineResultsRef.current(provider, 'recovery')
+    }, delay)
+    recovery.timer = timer
+    onlinePaginationRecoveryRef.current.set(provider, recovery)
+    return { attempts, delay }
+  }
   const availableSourceFilters = useMemo(
     () => [
       'all',
@@ -1389,6 +1488,30 @@ export function DiscoveryView({
       'emby',
     ] as readonly DiscoverySourceFilter[],
     [enabledProviderList],
+  )
+  const activeOnlineProvider = isOnlineMediaProvider(sourceFilter)
+    ? sourceFilter
+    : null
+  const activeProviderSearchTypeOptions = useMemo(
+    () => activeOnlineProvider
+      ? getOnlineProviderSearchTypeOptions(activeOnlineProvider)
+      : [],
+    [activeOnlineProvider],
+  )
+  const activeProviderSearchType = activeOnlineProvider
+    ? normalizeOnlineProviderSearchType(
+        activeOnlineProvider,
+        providerSearchType,
+      )
+    : null
+  const activeProviderSearchTypeLabels = useMemo(
+    () => Object.fromEntries(
+      activeProviderSearchTypeOptions.map((option) => [
+        option.value,
+        option.label,
+      ]),
+    ) as Partial<Record<OnlineProviderSearchType, string>>,
+    [activeProviderSearchTypeOptions],
   )
 
   const filteredResults = displayedResults
@@ -1695,16 +1818,23 @@ export function DiscoveryView({
   const sourceSummary = sourceFilter === 'all'
     ? ['本地', ...enabledProviderList.map(getOnlineProviderLabel), 'Emby'].join(' + ')
     : getDiscoverySourceLabel(sourceFilter)
+  const typeSummary = activeOnlineProvider
+    ? activeProviderSearchType === null
+      ? null
+      : activeProviderSearchTypeLabels[activeProviderSearchType]
+    : KIND_LABELS[kindFilter]
   const activeFilterSummary = [
     sourceSummary,
-    KIND_LABELS[kindFilter],
+    typeSummary,
     RESOLUTION_LABELS[resolutionFilter],
-  ].join(' · ')
+  ].filter(Boolean).join(' · ')
   const discoverySearchHint = aiSearchMode
     ? aiSearchError
       ? `AI 搜索暂不可用：${aiSearchError}`
       : aiSearchConfigured
-        ? 'AI 将理解画面语义，并在已建立视觉索引的关键帧中搜索'
+        ? aiCoverage
+          ? `AI 可搜索 ${aiCoverage.searchableLocalVideos} / ${aiCoverage.totalLocalVideos} 个本地视频 · 预览图 ${aiCoverage.thumbnailVideos} 个视频 · 关键帧索引 ${aiCoverage.visualIndexVideos} 个视频`
+          : 'AI 将理解视频预览图与视觉索引中的关键帧'
         : '请先在探索页设置中配置 AI 在线模型'
     : isOnlineMediaProvider(sourceFilter) && onlineSearchStatuses[sourceFilter]
       ? onlineSearchStatuses[sourceFilter]
@@ -1731,7 +1861,7 @@ export function DiscoveryView({
   })
   const retryBlockedOnlineSearches = () => {
     retryableOnlineProviders.forEach((provider) => {
-      loadMoreOnlineResultsRef.current(provider, true)
+      loadMoreOnlineResultsRef.current(provider, 'manual')
     })
   }
   const directOnlineSearchActive =
@@ -1766,6 +1896,7 @@ export function DiscoveryView({
   useEffect(
     () => () => {
       searchSequenceRef.current += 1
+      clearOnlinePaginationRecovery()
       if (hoverExitTimerRef.current !== null) {
         window.clearTimeout(hoverExitTimerRef.current)
       }
@@ -3316,16 +3447,40 @@ export function DiscoveryView({
     provider,
     ...request
   }: DiscoveryOnlineSearchRequest): Promise<DiscoveryOnlineSearchPage> => {
+    let pageRequest: Promise<DiscoveryOnlineSearchPage>
     if (onOnlineSearch) {
-      return Promise.resolve(onOnlineSearch({ provider, ...request }))
+      pageRequest = Promise.resolve().then(() =>
+        onOnlineSearch({ provider, ...request }),
+      )
+    } else if (provider === 'bilibili' && onBilibiliSearch) {
+      pageRequest = Promise.resolve().then(() => onBilibiliSearch(request))
+    } else if (provider === 'tencent' && onTencentSearch) {
+      pageRequest = Promise.resolve().then(() => onTencentSearch(request))
+    } else {
+      pageRequest = Promise.reject(
+        new Error(`${getOnlineProviderLabel(provider)} 搜索未接入`),
+      )
     }
-    if (provider === 'bilibili' && onBilibiliSearch) {
-      return Promise.resolve(onBilibiliSearch(request))
-    }
-    if (provider === 'tencent' && onTencentSearch) {
-      return Promise.resolve(onTencentSearch(request))
-    }
-    return Promise.reject(new Error(`${getOnlineProviderLabel(provider)} 搜索未接入`))
+    if (provider !== 'douyin') return pageRequest
+
+    return new Promise<DiscoveryOnlineSearchPage>((resolve, reject) => {
+      let settled = false
+      const finish = (
+        settle: () => void,
+      ) => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(timeout)
+        settle()
+      }
+      const timeout = window.setTimeout(() => {
+        finish(() => reject(new Error('Douyin pagination request timed out')))
+      }, DOUYIN_DISCOVERY_PAGE_REQUEST_TIMEOUT_MS)
+      pageRequest.then(
+        (page) => finish(() => resolve(page)),
+        (error) => finish(() => reject(error)),
+      )
+    })
   }
 
   const executeDiscoverySearch = async ({
@@ -3333,20 +3488,27 @@ export function DiscoveryView({
     source = sourceFilter,
     kind = kindFilter,
     resolution = resolutionFilter,
+    onlineSearchType = providerSearchType,
   }: {
     query: string
     source?: DiscoverySourceFilter
     kind?: DiscoveryKindFilter
     resolution?: DiscoveryResolutionFilter
+    onlineSearchType?: OnlineProviderSearchType
   }) => {
+    clearOnlinePaginationRecovery()
     const sequence = searchSequenceRef.current + 1
     searchSequenceRef.current = sequence
     const initialPaginationByProvider = createOnlinePaginationState()
     enabledProviderList.forEach((provider) => {
+      const searchType = source === provider
+        ? normalizeOnlineProviderSearchType(provider, onlineSearchType)
+        : null
       initialPaginationByProvider[provider] = {
         ...EMPTY_ONLINE_PAGINATION,
         searchSequence: sequence,
         query,
+        searchType,
       }
     })
     onlinePaginationRef.current = initialPaginationByProvider
@@ -3373,6 +3535,7 @@ export function DiscoveryView({
     type OnlineSearchOutcome = {
       results: readonly DiscoveryResult[]
       state: 'ready' | 'unavailable' | 'failed'
+      failureStatus: string | null
       page: number
       pageSize: number
       totalCount: number | null
@@ -3402,17 +3565,27 @@ export function DiscoveryView({
             query,
             page: 1,
             limit: BILIBILI_DISCOVERY_PAGE_SIZE,
+            ...(source === provider &&
+              normalizeOnlineProviderSearchType(provider, onlineSearchType)
+                ? {
+                    searchType: normalizeOnlineProviderSearchType(
+                      provider,
+                      onlineSearchType,
+                    )!,
+                  }
+                : {}),
           })
           return [provider, {
             results: Array.isArray(page.results) ? page.results : [],
             state: 'ready',
+            failureStatus: null,
             page: page.page,
             pageSize: page.pageSize,
             totalCount: page.totalCount,
             hasMore: page.hasMore,
             nextPage: page.nextPage,
           }]
-        } catch {
+        } catch (error) {
           return [provider, {
             results: [],
             state: onOnlineSearch ||
@@ -3420,6 +3593,7 @@ export function DiscoveryView({
               (provider === 'tencent' && onTencentSearch)
               ? 'failed'
               : 'unavailable',
+            failureStatus: getOnlineSearchFailureStatus(provider, error),
             page: 1,
             pageSize: BILIBILI_DISCOVERY_PAGE_SIZE,
             totalCount: null,
@@ -3522,6 +3696,9 @@ export function DiscoveryView({
       nextPaginationByProvider[provider] = {
         searchSequence: sequence,
         query,
+        searchType: source === provider
+          ? normalizeOnlineProviderSearchType(provider, onlineSearchType)
+          : null,
         nextPage: outcome.nextPage,
         totalCount: outcome.totalCount,
         hasMore: outcome.hasMore,
@@ -3543,9 +3720,11 @@ export function DiscoveryView({
           const status = outcome?.state === 'unavailable'
             ? `${label}在线搜索仅可在 Aurora 桌面版中使用`
             : outcome?.state === 'failed'
-              ? resultCount > 0
-                ? `${label}在线搜索暂不可用，已显示 Aurora 中已有结果`
-                : `${label}在线搜索暂不可用，请稍后重试`
+              ? outcome.failureStatus ?? (
+                  resultCount > 0
+                    ? `${label}在线搜索暂不可用，已显示 Aurora 中已有结果`
+                    : `${label}在线搜索暂不可用，请稍后重试`
+                )
               : resultCount > 0
                 ? `已找到 ${resultCount} 个${label}结果`
                 : `没有找到匹配的${label}内容`
@@ -3609,7 +3788,7 @@ export function DiscoveryView({
     setShowResults(true)
   }
 
-  loadMoreOnlineResultsRef.current = (provider, manualRetry = false) => {
+  loadMoreOnlineResultsRef.current = (provider, retryMode) => {
     const pagination = onlinePaginationRef.current[provider]
     const sequence = searchSequenceRef.current
     if (
@@ -3617,7 +3796,7 @@ export function DiscoveryView({
       pagination.loading ||
       !pagination.hasMore ||
       pagination.nextPage === null ||
-      (pagination.autoLoadBlocked && !manualRetry) ||
+      (pagination.autoLoadBlocked && retryMode === undefined) ||
       pagination.searchSequence !== sequence ||
       pagination.query !== committedQuery ||
       !shouldRunDirectOnlineSearch(sourceFilter, provider) ||
@@ -3625,6 +3804,7 @@ export function DiscoveryView({
     ) {
       return
     }
+    if (retryMode === 'manual') clearOnlinePaginationRecovery(provider)
 
     const loadingPagination = {
       ...pagination,
@@ -3654,6 +3834,9 @@ export function DiscoveryView({
       query: pagination.query,
       page: pagination.nextPage,
       limit: BILIBILI_DISCOVERY_PAGE_SIZE,
+      ...(pagination.searchType
+        ? { searchType: pagination.searchType }
+        : {}),
     })
       .then(async (page) => {
         ignoreTransientOnlineResultsUntilRef.current = Math.max(
@@ -3699,10 +3882,51 @@ export function DiscoveryView({
           const loadedProviderCount = nextResults.filter(
             (result) => result.source === provider,
           ).length
+          if (provider === 'douyin') {
+            const recovery = scheduleDouyinPaginationRecovery({
+              pagination: {
+                ...onlinePaginationRef.current[provider],
+                searchSequence: sequence,
+                query: pagination.query,
+                searchType: pagination.searchType,
+                nextPage: pagination.nextPage,
+                totalCount: pagination.totalCount,
+                hasMore: true,
+                loading: false,
+              },
+            })
+            const noProgressMessage = recovery
+              ? `抖音暂未加载到新增结果，${Math.ceil(recovery.delay / 1_000)} 秒后自动重试（${recovery.attempts}/${DOUYIN_DISCOVERY_RECOVERY_DELAYS_MS.length}），也可点击立即重试`
+              : '抖音暂未加载到更多结果，点击此处重试'
+            const blockedPagination: DiscoveryOnlinePaginationState = {
+              ...onlinePaginationRef.current[provider],
+              searchSequence: sequence,
+              query: pagination.query,
+              searchType: pagination.searchType,
+              nextPage: pagination.nextPage,
+              totalCount: pagination.totalCount,
+              hasMore: true,
+              loading: false,
+              autoLoadBlocked: true,
+              loadMoreError: noProgressMessage,
+            }
+            const blockedPaginationByProvider = {
+              ...onlinePaginationRef.current,
+              [provider]: blockedPagination,
+            }
+            onlinePaginationRef.current = blockedPaginationByProvider
+            setOnlinePaginationByProvider(blockedPaginationByProvider)
+            setOnlineSearchStatuses((current) => ({
+              ...current,
+              [provider]: noProgressMessage,
+            }))
+            return
+          }
           if (!page.hasMore || page.nextPage === null) {
             const completedPagination: DiscoveryOnlinePaginationState = {
               searchSequence: sequence,
               query: pagination.query,
+              searchType: pagination.searchType,
               nextPage: null,
               totalCount: page.totalCount,
               hasMore: false,
@@ -3727,6 +3951,7 @@ export function DiscoveryView({
             ...onlinePaginationRef.current[provider],
             searchSequence: sequence,
             query: pagination.query,
+            searchType: pagination.searchType,
             nextPage: pagination.nextPage,
             totalCount: page.totalCount,
             hasMore: true,
@@ -3746,9 +3971,11 @@ export function DiscoveryView({
           }))
           return
         }
+        clearOnlinePaginationRecovery(provider)
         const nextPagination: DiscoveryOnlinePaginationState = {
           searchSequence: sequence,
           query: pagination.query,
+          searchType: pagination.searchType,
           nextPage: page.nextPage,
           totalCount: page.totalCount,
           hasMore: page.hasMore,
@@ -3773,10 +4000,26 @@ export function DiscoveryView({
             : `已加载全部 ${loadedProviderCount} 个${label}结果`,
         }))
       })
-      .catch(() => {
+      .catch((error) => {
         if (searchSequenceRef.current !== sequence) return
         const label = getOnlineProviderLabel(provider)
-        const loadMoreError = `加载更多${label}结果失败，点击此处重试`
+        const actionableFailureStatus = getOnlineSearchFailureStatus(
+          provider,
+          error,
+          true,
+        )
+        if (actionableFailureStatus) {
+          clearOnlinePaginationRecovery(provider)
+        }
+        const recovery =
+          provider === 'douyin' && !actionableFailureStatus
+            ? scheduleDouyinPaginationRecovery({ pagination })
+            : null
+        const loadMoreError = actionableFailureStatus ?? (
+          recovery
+            ? `抖音加载更多结果暂时失败，${Math.ceil(recovery.delay / 1_000)} 秒后自动重试（${recovery.attempts}/${DOUYIN_DISCOVERY_RECOVERY_DELAYS_MS.length}），也可点击立即重试`
+            : `加载更多${label}结果失败，点击此处重试`
+        )
         const failedPagination = {
           ...onlinePaginationRef.current[provider],
           loading: false,
@@ -3856,6 +4099,11 @@ export function DiscoveryView({
 
   const enabledProviderSignature = enabledProviderList.join('|')
   useEffect(() => {
+    onlinePaginationRecoveryRef.current.forEach((_recovery, provider) => {
+      if (!enabledProviderSet.has(provider)) {
+        clearOnlinePaginationRecovery(provider)
+      }
+    })
     setOnlineSearchStatuses((current) => {
       const next = Object.fromEntries(
         Object.entries(current).filter(([provider]) =>
@@ -4276,13 +4524,30 @@ export function DiscoveryView({
                 className={sourceFilter === source ? 'active' : ''}
                 aria-pressed={sourceFilter === source}
                 onClick={() => {
+                  const nextProviderSearchType = isOnlineMediaProvider(source)
+                    ? normalizeOnlineProviderSearchType(
+                        source,
+                        providerSearchType,
+                      )
+                    : null
+                  const nextKind = isOnlineMediaProvider(source)
+                    ? 'all'
+                    : kindFilter
                   resetCorridorForContextChange()
                   setSourceFilter(source)
+                  if (nextProviderSearchType) {
+                    setProviderSearchType(nextProviderSearchType)
+                  }
+                  if (nextKind !== kindFilter) setKindFilter(nextKind)
                   stopPreviewAndClearStatus()
                   if (hasSearched) {
                     void executeDiscoverySearch({
                       query: committedQuery,
                       source,
+                      kind: nextKind,
+                      ...(nextProviderSearchType
+                        ? { onlineSearchType: nextProviderSearchType }
+                        : {}),
                     })
                   }
                 }}
@@ -4291,22 +4556,45 @@ export function DiscoveryView({
               </button>
             ))}
           </div>
-          <FilterSelect
-            label="类型"
-            value={kindFilter}
-            options={KIND_LABELS}
-            onChange={(value) => {
-              resetCorridorForContextChange()
-              setKindFilter(value)
-              stopPreviewAndClearStatus()
-              if (hasSearched) {
-                void executeDiscoverySearch({
-                  query: committedQuery,
-                  kind: value,
-                })
-              }
-            }}
-          />
+          {activeOnlineProvider ? (
+            activeProviderSearchType &&
+            activeProviderSearchTypeOptions.length > 0 ? (
+              <FilterSelect
+                label="类型"
+                value={activeProviderSearchType}
+                options={activeProviderSearchTypeLabels}
+                onChange={(value) => {
+                  resetCorridorForContextChange()
+                  setProviderSearchType(value)
+                  stopPreviewAndClearStatus()
+                  if (hasSearched) {
+                    void executeDiscoverySearch({
+                      query: committedQuery,
+                      kind: 'all',
+                      onlineSearchType: value,
+                    })
+                  }
+                }}
+              />
+            ) : null
+          ) : (
+            <FilterSelect
+              label="类型"
+              value={kindFilter}
+              options={KIND_LABELS}
+              onChange={(value) => {
+                resetCorridorForContextChange()
+                setKindFilter(value)
+                stopPreviewAndClearStatus()
+                if (hasSearched) {
+                  void executeDiscoverySearch({
+                    query: committedQuery,
+                    kind: value,
+                  })
+                }
+              }}
+            />
+          )}
           <FilterSelect
             label="分辨率"
             value={resolutionFilter}

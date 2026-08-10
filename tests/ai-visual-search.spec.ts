@@ -95,6 +95,7 @@ type AiVisualFrameCandidate = {
   projectTitle: string
   tags: string[]
   note: string
+  analysisTier?: 'thumbnail' | 'visual-index'
 }
 
 type AiVisualSearchResponse = {
@@ -112,6 +113,21 @@ type AiVisualSearchResponse = {
   semanticQuery: string
 }
 
+type AiVisualFrameAnalysisResponse = {
+  frames: Array<{
+    resultId: string
+    assetId: string
+    frameId: string
+    timeSeconds: number
+    descriptionZh: string
+    descriptionEn: string
+    keywordsZh: string[]
+    keywordsEn: string[]
+  }>
+  analyzedFrameCount: number
+  newlyAnalyzedFrameCount: number
+}
+
 type AiVisualSearchService = {
   cachePath: string
   search(request: {
@@ -122,6 +138,11 @@ type AiVisualSearchService = {
     visionProfileId?: string | null
     embeddingProfileId?: string | null
   }): Promise<AiVisualSearchResponse>
+  analyzeFrames(request: {
+    candidates: AiVisualFrameCandidate[]
+    profileId?: string | null
+    visionProfileId?: string | null
+  }): Promise<AiVisualFrameAnalysisResponse>
   testProfile(input: unknown): Promise<{
     vision: { ok: true; model: string }
     embedding: { ok: true; model: string; dimensions: number }
@@ -395,7 +416,6 @@ test('兼容 chat/completions 与动态维数 embeddings，并跨重启复用缓
   expect(first.newlyAnalyzedFrameCount).toBe(3)
   expect(first.matches.map((match) => match.resultId)).toEqual([
     candidates[0].resultId,
-    candidates[2].resultId,
   ])
   expect(provider.visionIndexCalls).toBe(1)
   expect(provider.embeddingCalls).toBe(2)
@@ -443,6 +463,175 @@ test('兼容 chat/completions 与动态维数 embeddings，并跨重启复用缓
   expect(readFileSync(service.cachePath, 'utf8')).toContain(
     embeddingServiceFingerprint(activeProfile, descriptionFingerprint),
   )
+})
+
+test('语义分数不高于通用画面基线时不硬返回无关结果', async () => {
+  const { userDataPath, candidates } = createHarness()
+  const profile = cloudProfile()
+  const fetchImpl = async (url: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+    if (String(url).endsWith('/chat/completions')) {
+      const count = expectedVisionFrameCount(body)
+      return jsonResponse({
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              frames: Array.from({ length: count }, (_, slot) => ({
+                slot,
+                descriptionZh: '白天的工业变电站与输电设备',
+                descriptionEn: 'Industrial power substation in daylight',
+                keywordsZh: ['工业', '电网', '白天'],
+                keywordsEn: ['industry', 'power grid', 'daylight'],
+              })),
+            }),
+          },
+        }],
+      })
+    }
+    const input = body.input as string[]
+    return jsonResponse({
+      data: input.map((text, index) => ({
+        index,
+        embedding: text.includes('日落')
+          ? vector(3, 1, 0)
+          : text.includes('普通的影视画面')
+            ? vector(3, 0, 1)
+            : vector(3, 0.08, 0.99),
+      })),
+    })
+  }
+  const service = createAiVisualSearchService({
+    userDataPath,
+    credentialsStore: {
+      readActiveProfileForMainProcess: async () => profile,
+      resolveProfileInputForMainProcess: async () => profile,
+    },
+    fetchImpl: fetchImpl as typeof fetch,
+  })
+
+  const result = await service.search({ query: '日落', candidates, limit: 9 })
+  expect(result.indexedFrameCount).toBe(3)
+  expect(result.matches).toEqual([])
+})
+
+test('关键帧分析只调用视觉服务并复用逐帧描述缓存', async () => {
+  const { userDataPath, candidates } = createHarness()
+  const provider = createCompatibleProviderMock()
+  const active: ActiveServices = {
+    vision: serviceProfile('vision'),
+    embedding: null,
+  }
+  const service = createAiVisualSearchService({
+    userDataPath,
+    credentialsStore: {
+      readActiveServicesForMainProcess: async () => active,
+      resolveServiceProfileInputForMainProcess: async (kind) => active[kind]!,
+    },
+    fetchImpl: provider.fetchImpl,
+  })
+
+  const first = await service.analyzeFrames({
+    candidates,
+    visionProfileId: active.vision!.id,
+  })
+  expect(first).toMatchObject({
+    analyzedFrameCount: 3,
+    newlyAnalyzedFrameCount: 3,
+  })
+  expect(first.frames.map((frame) => frame.resultId)).toEqual(
+    candidates.map((candidate) => candidate.resultId),
+  )
+  expect(first.frames[0]).toMatchObject({
+    assetId: 'asset-1',
+    frameId: 'frame-0',
+    timeSeconds: 0,
+    descriptionZh: '雪山峡谷中的蓝色晨雾',
+    keywordsZh: ['雪山', '晨雾', '蓝色'],
+  })
+  expect(provider.visionIndexCalls).toBe(1)
+  expect(provider.embeddingCalls).toBe(0)
+
+  const second = await service.analyzeFrames({
+    candidates,
+    visionProfileId: active.vision!.id,
+  })
+  expect(second.newlyAnalyzedFrameCount).toBe(0)
+  expect(second.frames).toEqual(first.frames)
+  expect(provider.visionIndexCalls).toBe(1)
+  expect(provider.embeddingCalls).toBe(0)
+  const cacheText = readFileSync(service.cachePath, 'utf8')
+  expect(cacheText).toContain('"imageFingerprint"')
+  expect(cacheText).toContain('"timeSeconds":0')
+})
+
+test('关键帧分析缓存同时校验时间与实际图片内容', async () => {
+  const { userDataPath, candidates } = createHarness()
+  const provider = createCompatibleProviderMock()
+  const profile = cloudProfile()
+  const service = createAiVisualSearchService({
+    userDataPath,
+    credentialsStore: {
+      readActiveProfileForMainProcess: async () => profile,
+      resolveProfileInputForMainProcess: async () => profile,
+    },
+    fetchImpl: provider.fetchImpl,
+  })
+  const candidate = candidates[0]
+
+  const first = await service.analyzeFrames({ candidates: [candidate] })
+  expect(first.newlyAnalyzedFrameCount).toBe(1)
+  const searchAfterAnalysis = await service.search({
+    query: '雪山',
+    candidates: [candidate],
+  })
+  expect(searchAfterAnalysis.newlyAnalyzedFrameCount).toBe(0)
+  expect(provider.visionIndexCalls).toBe(1)
+
+  writeFileSync(candidate.imagePath, Buffer.from('replacement-frame-content'))
+  const changedContent = await service.analyzeFrames({ candidates: [candidate] })
+  expect(changedContent.newlyAnalyzedFrameCount).toBe(1)
+
+  const changedTime = await service.analyzeFrames({
+    candidates: [{ ...candidate, timeSeconds: 7.25 }],
+  })
+  expect(changedTime.newlyAnalyzedFrameCount).toBe(1)
+  const repeated = await service.analyzeFrames({
+    candidates: [{ ...candidate, timeSeconds: 7.25 }],
+  })
+  expect(repeated.newlyAnalyzedFrameCount).toBe(0)
+  expect(provider.visionIndexCalls).toBe(3)
+  expect(provider.embeddingCalls).toBe(2)
+})
+
+test('关键帧分析拒绝与请求不一致的 active 视觉服务', async () => {
+  const { userDataPath, candidates } = createHarness()
+  const provider = createCompatibleProviderMock()
+  const active: ActiveServices = {
+    vision: serviceProfile('vision', { id: 'vision-after-switch' }),
+    embedding: null,
+  }
+  const service = createAiVisualSearchService({
+    userDataPath,
+    credentialsStore: {
+      readActiveServicesForMainProcess: async () => active,
+      resolveServiceProfileInputForMainProcess: async (kind) => active[kind]!,
+    },
+    fetchImpl: provider.fetchImpl,
+  })
+
+  let caught: unknown
+  try {
+    await service.analyzeFrames({
+      candidates,
+      visionProfileId: 'vision-before-switch',
+    })
+  } catch (error) {
+    caught = error
+  }
+  expect(normalizeAiVisualSearchError(caught)).toMatchObject({
+    code: 'AI_SEARCH_PROFILE_CHANGED',
+  })
+  expect(provider.calls).toHaveLength(0)
 })
 
 test('本地视觉服务使用内存联系表并长期只缓存逐帧语义结果', async () => {

@@ -1,9 +1,13 @@
 {
   "name": "aurora-project-library-prototype",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "Aurora cinematic project library prototype",
   "author": "nuomiyuwan",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nuomiyuwan/Aurora.git"
+  },
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -15,8 +19,9 @@
     "media-tools:mac:arm64": "bash scripts/build-ffmpeg-macos-arm64.sh",
     "media-tools:mac:x64": "arch -x86_64 bash scripts/build-ffmpeg-macos-x64.sh",
     "preview": "vite preview",
-    "package:mac": "npm run package:mac:arm64",
-    "package:mac:arm64": "npm run build && node scripts/package-macos.cjs arm64 dir",
+    "package:mac": "npm run package:mac:arm64:installer",
+    "package:mac:arm64": "npm run package:mac:arm64:installer",
+    "package:mac:arm64:dir": "npm run build && node scripts/package-macos.cjs arm64 dir",
     "package:mac:arm64:installer": "npm run build && node scripts/package-macos.cjs arm64 installer",
     "package:mac:x64:installer": "npm run build && node scripts/package-macos.cjs x64 installer",
     "package:win": "npm run package:win:dir",
@@ -27,6 +32,13 @@
   "build": {
     "appId": "local.aurora-project-library",
     "productName": "Aurora",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "nuomiyuwan",
+        "repo": "Aurora"
+      }
+    ],
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -129,6 +141,7 @@
     "jpeg-js": "^0.4.4",
     "lucide-react": "^1.21.0",
     "pngjs": "^7.0.0",
+    "electron-updater": "^6.8.9",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "three": "^0.185.1"

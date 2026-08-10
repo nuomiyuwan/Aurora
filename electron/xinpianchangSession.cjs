@@ -22,6 +22,12 @@ const MAX_REDIRECTS = 2
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 const MAX_COVER_BYTES = 12 * 1024 * 1024
 const SEARCH_TIMEOUT_MS = 12_000
+const MAX_EMBEDDED_FRAME_EDGE = 480
+const MAX_EMBEDDED_FRAME_SOURCE_EDGE = 16_384
+const MAX_EMBEDDED_FRAME_SOURCE_PIXELS = 100_000_000
+const MAX_EMBEDDED_FRAME_DATA_URL_LENGTH = 3 * 1024 * 1024
+const EMBEDDED_FRAME_READY_TIMEOUT_MS = 1_500
+const EMBEDDED_FRAME_CAPTURE_TIMEOUT_MS = 2_500
 
 const IMAGE_CONTENT_TYPES = new Map([
   ['image/avif', '.avif'],
@@ -40,6 +46,44 @@ const GENERIC_BINARY_CONTENT_TYPES = new Set([
 ])
 const WAF_STATUS_CODES = new Set([403, 406, 412, 418, 429])
 const XINPIANCHANG_GUESTS = new WeakMap()
+
+const READ_EMBEDDED_VIDEO_FRAME_READY_SCRIPT = `
+(() => new Promise((resolve) => {
+  const video = Array.from(document.querySelectorAll('video')).find(
+    (candidate) =>
+      candidate.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+      candidate.videoWidth > 0 &&
+      candidate.videoHeight > 0 &&
+      !candidate.seeking
+  )
+  if (!video) {
+    resolve(false)
+    return
+  }
+  let settled = false
+  const finish = () => {
+    if (settled) return
+    settled = true
+    resolve(
+      document.contains(video) &&
+      video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+      video.videoWidth > 0 &&
+      video.videoHeight > 0 &&
+      !video.seeking
+    )
+  }
+  const timeout = window.setTimeout(finish, 280)
+  const finishAfterPaint = () => {
+    window.clearTimeout(timeout)
+    window.requestAnimationFrame(() => window.requestAnimationFrame(finish))
+  }
+  if (typeof video.requestVideoFrameCallback === 'function') {
+    video.requestVideoFrameCallback(finishAfterPaint)
+  } else {
+    finishAfterPaint()
+  }
+}))()
+`
 
 class XinpianchangSearchUnavailableError extends Error {
   constructor(reason = 'unavailable') {
@@ -642,6 +686,11 @@ function destroyGuest(guest) {
 function installXinpianchangPlayerWebviewGuard(hostContents, expectedSession = null) {
   if (!hostContents?.on) throw new TypeError('Host webContents is required')
   const pendingTargets = []
+  const installation = {
+    activeGuest: null,
+    activeTarget: null,
+    disposed: false,
+  }
 
   const handleWillAttach = (event, webPreferences = {}, params = {}) => {
     const preferencePartition = String(webPreferences.partition ?? '')
@@ -669,14 +718,28 @@ function installXinpianchangPlayerWebviewGuard(hostContents, expectedSession = n
   }
 
   const handleAttached = (_event, guest) => {
-    if (partitionOf(guest?.session) !== XINPIANCHANG_PARTITION) return
+    // Electron's real Session object does not expose getPartition().  Runtime
+    // installation always supplies the dedicated persistent Session, so use
+    // object identity as the authority there.  Keep the partition probe only
+    // for isolated callers that do not provide an expected Session.
+    const ownsExpectedSession = expectedSession
+      ? guest?.session === expectedSession
+      : partitionOf(guest?.session) === XINPIANCHANG_PARTITION
+    if (!ownsExpectedSession) return
     const initialTarget = pendingTargets.shift() ??
       parseXinpianchangPlaybackUrl(guest.getURL?.())
-    if (!initialTarget || (expectedSession && guest.session !== expectedSession)) {
+    if (!initialTarget) {
       destroyGuest(guest)
       return
     }
-    XINPIANCHANG_GUESTS.set(guest, initialTarget)
+    installation.activeGuest = guest
+    installation.activeTarget = initialTarget
+    guest.once?.('destroyed', () => {
+      if (installation.activeGuest === guest) {
+        installation.activeGuest = null
+        installation.activeTarget = null
+      }
+    })
 
     const navigationTarget = (url) => {
       const direct = parseXinpianchangPlaybackUrl(url)
@@ -701,10 +764,147 @@ function installXinpianchangPlayerWebviewGuard(hostContents, expectedSession = n
 
   hostContents.on('will-attach-webview', handleWillAttach)
   hostContents.on('did-attach-webview', handleAttached)
+  XINPIANCHANG_GUESTS.set(hostContents, installation)
   return () => {
+    if (installation.disposed) return
+    installation.disposed = true
     pendingTargets.length = 0
+    installation.activeGuest = null
+    installation.activeTarget = null
     hostContents.removeListener?.('will-attach-webview', handleWillAttach)
     hostContents.removeListener?.('did-attach-webview', handleAttached)
+    if (XINPIANCHANG_GUESTS.get(hostContents) === installation) {
+      XINPIANCHANG_GUESTS.delete(hostContents)
+    }
+  }
+}
+
+function normalizeEmbeddedFrameCaptureRequest(request) {
+  if (
+    !request ||
+    typeof request !== 'object' ||
+    Array.isArray(request) ||
+    Object.keys(request).sort().join(',') !== 'kind,mediaId' ||
+    request.kind !== 'video'
+  ) return null
+  const mediaId = normalizeArticleId(request.mediaId)
+  return mediaId ? { kind: 'video', mediaId } : null
+}
+
+function parseXinpianchangEmbeddedNavigationTarget(value) {
+  return parseXinpianchangPlaybackUrl(value) ??
+    parseXinpianchangPlayerNavigationUrl(value)
+}
+
+function settleEmbeddedFrameOperation(operation, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      resolve(null)
+    }, timeoutMs)
+    Promise.resolve(operation).then(
+      (value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(value)
+      },
+      () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(null)
+      },
+    )
+  })
+}
+
+function readEmbeddedFrameImageSize(image) {
+  const size = image?.getSize?.()
+  const width = size?.width
+  const height = size?.height
+  if (
+    !Number.isSafeInteger(width) ||
+    !Number.isSafeInteger(height) ||
+    width <= 0 ||
+    height <= 0 ||
+    width > MAX_EMBEDDED_FRAME_SOURCE_EDGE ||
+    height > MAX_EMBEDDED_FRAME_SOURCE_EDGE ||
+    width * height > MAX_EMBEDDED_FRAME_SOURCE_PIXELS
+  ) return null
+  return { width, height }
+}
+
+async function captureXinpianchangEmbeddedFrame(hostContents, request) {
+  const normalizedRequest = normalizeEmbeddedFrameCaptureRequest(request)
+  const installation = hostContents && typeof hostContents === 'object'
+    ? XINPIANCHANG_GUESTS.get(hostContents)
+    : null
+  const guest = installation?.activeGuest
+  const target = installation?.activeTarget
+  const currentTarget = guest && typeof guest.getURL === 'function'
+    ? parseXinpianchangEmbeddedNavigationTarget(guest.getURL())
+    : null
+  if (
+    !normalizedRequest ||
+    !installation ||
+    installation.disposed ||
+    !guest ||
+    guest.isDestroyed?.() === true ||
+    !target ||
+    target.kind !== normalizedRequest.kind ||
+    target.mediaId !== normalizedRequest.mediaId ||
+    currentTarget?.articleId !== normalizedRequest.mediaId ||
+    typeof guest.executeJavaScript !== 'function' ||
+    typeof guest.capturePage !== 'function'
+  ) return null
+
+  try {
+    const ready = await settleEmbeddedFrameOperation(
+      guest.executeJavaScript(READ_EMBEDDED_VIDEO_FRAME_READY_SCRIPT, true),
+      EMBEDDED_FRAME_READY_TIMEOUT_MS,
+    )
+    if (
+      ready !== true ||
+      installation.activeGuest !== guest ||
+      guest.isDestroyed?.() === true
+    ) return null
+
+    let image = await settleEmbeddedFrameOperation(
+      guest.capturePage(),
+      EMBEDDED_FRAME_CAPTURE_TIMEOUT_MS,
+    )
+    if (
+      installation.activeGuest !== guest ||
+      guest.isDestroyed?.() === true ||
+      !image ||
+      image.isEmpty?.() !== false
+    ) return null
+
+    let size = readEmbeddedFrameImageSize(image)
+    if (!size) return null
+    if (Math.max(size.width, size.height) > MAX_EMBEDDED_FRAME_EDGE) {
+      image = image.resize?.(
+        size.width >= size.height
+          ? { width: MAX_EMBEDDED_FRAME_EDGE, quality: 'good' }
+          : { height: MAX_EMBEDDED_FRAME_EDGE, quality: 'good' },
+      )
+      if (!image || image.isEmpty?.() !== false) return null
+      size = readEmbeddedFrameImageSize(image)
+      if (!size || Math.max(size.width, size.height) > MAX_EMBEDDED_FRAME_EDGE) {
+        return null
+      }
+    }
+    const dataUrl = image.toDataURL?.()
+    return typeof dataUrl === 'string' &&
+      dataUrl.length <= MAX_EMBEDDED_FRAME_DATA_URL_LENGTH &&
+      /^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(dataUrl)
+      ? dataUrl
+      : null
+  } catch {
+    return null
   }
 }
 
@@ -1116,6 +1316,7 @@ module.exports = {
   XINPIANCHANG_LOGIN_URL,
   XINPIANCHANG_SEARCH_UNAVAILABLE_CODE,
   XinpianchangSearchUnavailableError,
+  captureXinpianchangEmbeddedFrame,
   createXinpianchangArticleUrl,
   createXinpianchangManagedCoverInput,
   createXinpianchangPlaybackTarget,

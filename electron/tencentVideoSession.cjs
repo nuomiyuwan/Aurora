@@ -520,6 +520,30 @@ function normalizePage(value) {
   return value
 }
 
+const TENCENT_SEARCH_TYPE_TERMS = Object.freeze({
+  kids: ['少儿', '儿童', '亲子'],
+  documentary: ['纪录片', '纪录'],
+  anime: ['动漫', '动画', '国漫'],
+  variety: ['综艺'],
+  tv: ['电视剧', '电视'],
+})
+
+function normalizeTencentSearchType(value) {
+  const searchType = value ?? 'all'
+  if (searchType !== 'all' && !TENCENT_SEARCH_TYPE_TERMS[searchType]) {
+    throw new TypeError('Tencent search type is invalid')
+  }
+  return searchType
+}
+
+function matchesTencentSearchType(descriptor, searchType) {
+  if (searchType === 'all') return true
+  const searchable = descriptor.tags.join(' ').toLowerCase()
+  return TENCENT_SEARCH_TYPE_TERMS[searchType].some((term) =>
+    searchable.includes(term.toLowerCase()),
+  )
+}
+
 function formatDuration(secondsValue) {
   const seconds = Number(secondsValue)
   if (!Number.isFinite(seconds) || seconds <= 0) return '由腾讯视频页面提供'
@@ -542,7 +566,11 @@ function normalizeCoverUrl(value) {
   return parsed.toString()
 }
 
-function normalizeTencentSearchPayload(payload, { query, page, limit }) {
+function normalizeTencentSearchPayload(
+  payload,
+  { query, page, limit, searchType: rawSearchType },
+) {
+  const searchType = normalizeTencentSearchType(rawSearchType)
   const albumItems = (payload?.data?.areaBoxList ?? []).flatMap((box) =>
     Array.isArray(box?.itemList) ? box.itemList : [],
   )
@@ -633,7 +661,9 @@ function normalizeTencentSearchPayload(payload, { query, page, limit }) {
     appendAlbum(item)
     appendVideo(item)
   })
-  const boundedResults = results.slice(0, limit)
+  const boundedResults = results
+    .filter((descriptor) => matchesTencentSearchType(descriptor, searchType))
+    .slice(0, limit)
   const normalTotal = Number(normalList?.totalNum)
   const totalCount = Math.max(
     boundedResults.length,
@@ -957,6 +987,7 @@ function createTencentVideoSessionManager({
     if (!query) throw new TypeError('A non-empty Tencent search query is required')
     const limit = normalizeLimit(request?.limit)
     const page = normalizePage(request?.page)
+    const searchType = normalizeTencentSearchType(request?.searchType)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS)
     try {
@@ -1013,7 +1044,7 @@ function createTencentVideoSessionManager({
       }
       const normalized = normalizeTencentSearchPayload(
         await readJson(response),
-        { query, page, limit },
+        { query, page, limit, searchType },
       )
       normalized.results = await Promise.all(
         normalized.results.map(async (descriptor) => ({

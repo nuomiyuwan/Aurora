@@ -83,3 +83,32 @@ test('accepts only identity-matched canonical Youku show and video pages', () =>
     canonicalUrl: `https://evil.example/v_show/id_${videoId}.html`,
   })).toBeNull()
 })
+
+test('creates only identity-matched official Douyin player URLs', () => {
+  const mediaId = '7535724040761244971'
+  const playback = {
+    provider: 'douyin' as const,
+    kind: 'video' as const,
+    mediaId,
+    canonicalUrl: `https://www.douyin.com/video/${mediaId}`,
+  }
+  expect(createOnlineOfficialPlaybackUrl(playback)).toBe(
+    `https://open.douyin.com/player/video?vid=${mediaId}&autoplay=1`,
+  )
+  expect(createOnlineOfficialPlaybackUrl({
+    ...playback,
+    kind: 'episode',
+  })).toBeNull()
+  expect(createOnlineOfficialPlaybackUrl({
+    ...playback,
+    mediaId: '7535724040761244972',
+  })).toBeNull()
+  expect(createOnlineOfficialPlaybackUrl({
+    ...playback,
+    canonicalUrl: `https://www.douyin.com/video/${mediaId}?from=search`,
+  })).toBeNull()
+  expect(createOnlineOfficialPlaybackUrl({
+    ...playback,
+    canonicalUrl: `https://attacker.example/video/${mediaId}`,
+  })).toBeNull()
+})

@@ -20,6 +20,12 @@ const MAX_VISION_BATCH_DEADLINE_MS = 240_000
 const VISION_BATCH_SIZE = 12
 const EMBEDDING_BATCH_SIZE = 96
 const NEARBY_FRAME_WINDOW_SECONDS = 3
+const MIN_RELEVANT_COSINE_SCORE = 0.28
+const MIN_RELEVANCE_MARGIN_OVER_GENERIC = 0.045
+const MIN_LEXICAL_COSINE_SCORE = 0.18
+const RELEVANT_SCORE_BAND = 0.18
+const GENERIC_VISUAL_BASELINE_TEXT =
+  '普通的影视画面，与用户当前要求的主体、场景、动作、时间和氛围无关。'
 const ALLOWED_IMAGE_EXTENSIONS = new Map([
   ['.jpg', 'image/jpeg'],
   ['.jpeg', 'image/jpeg'],
@@ -99,42 +105,25 @@ function finiteNonNegativeNumber(value, label) {
   return number
 }
 
-function normalizeSearchRequest(request) {
-  if (!request || typeof request !== 'object') {
-    throw new AiVisualSearchError(
-      'AI_SEARCH_INVALID_INPUT',
-      'AI 搜索请求无效。',
-    )
-  }
+function normalizeAnalysisTier(value) {
+  return value === 'thumbnail' ? 'thumbnail' : 'visual-index'
+}
 
-  const query = boundedString(request.query, '搜索内容', MAX_QUERY_LENGTH)
-  if (!Array.isArray(request.candidates)) {
+function normalizeFrameCandidates(rawCandidates) {
+  if (!Array.isArray(rawCandidates)) {
     throw new AiVisualSearchError(
       'AI_SEARCH_INVALID_INPUT',
       '没有可搜索的关键帧。',
     )
   }
-  if (request.candidates.length > MAX_CANDIDATE_COUNT) {
+  if (rawCandidates.length > MAX_CANDIDATE_COUNT) {
     throw new AiVisualSearchError(
       'AI_SEARCH_REQUEST_TOO_LARGE',
       '可搜索的关键帧过多，请缩小搜索范围后重试。',
     )
   }
-
-  const requestedLimit = request.limit == null ? 24 : Number(request.limit)
-  if (
-    !Number.isInteger(requestedLimit) ||
-    requestedLimit < 1 ||
-    requestedLimit > MAX_RESULT_COUNT
-  ) {
-    throw new AiVisualSearchError(
-      'AI_SEARCH_INVALID_INPUT',
-      '搜索结果数量无效。',
-    )
-  }
-
   const seenResultIds = new Set()
-  const candidates = request.candidates.map((candidate) => {
+  return rawCandidates.map((candidate) => {
     if (!candidate || typeof candidate !== 'object') {
       throw new AiVisualSearchError(
         'AI_SEARCH_INVALID_INPUT',
@@ -159,6 +148,7 @@ function normalizeSearchRequest(request) {
       projectTitle: optionalBoundedString(candidate.projectTitle, 512),
       tags: normalizeStringList(candidate.tags),
       note: optionalBoundedString(candidate.note),
+      analysisTier: normalizeAnalysisTier(candidate.analysisTier),
     }
 
     if (seenResultIds.has(normalized.resultId)) {
@@ -170,6 +160,29 @@ function normalizeSearchRequest(request) {
     seenResultIds.add(normalized.resultId)
     return normalized
   })
+}
+
+function normalizeSearchRequest(request) {
+  if (!request || typeof request !== 'object') {
+    throw new AiVisualSearchError(
+      'AI_SEARCH_INVALID_INPUT',
+      'AI 搜索请求无效。',
+    )
+  }
+
+  const query = boundedString(request.query, '搜索内容', MAX_QUERY_LENGTH)
+  const candidates = normalizeFrameCandidates(request.candidates)
+  const requestedLimit = request.limit == null ? 24 : Number(request.limit)
+  if (
+    !Number.isInteger(requestedLimit) ||
+    requestedLimit < 1 ||
+    requestedLimit > MAX_RESULT_COUNT
+  ) {
+    throw new AiVisualSearchError(
+      'AI_SEARCH_INVALID_INPUT',
+      '搜索结果数量无效。',
+    )
+  }
 
   return {
     query,
@@ -193,6 +206,31 @@ function normalizeSearchRequest(request) {
         : boundedString(
             request.embeddingProfileId ?? request.embeddingServiceId,
             '语义检索服务 ID',
+            128,
+          ),
+  }
+}
+
+function normalizeFrameAnalysisRequest(request) {
+  if (!request || typeof request !== 'object') {
+    throw new AiVisualSearchError(
+      'AI_SEARCH_INVALID_INPUT',
+      '关键帧分析请求无效。',
+    )
+  }
+
+  return {
+    candidates: normalizeFrameCandidates(request.candidates),
+    profileId:
+      request.profileId == null
+        ? null
+        : boundedString(request.profileId, '模型服务 ID', 128),
+    visionProfileId:
+      request.visionProfileId == null && request.visionServiceId == null
+        ? null
+        : boundedString(
+            request.visionProfileId ?? request.visionServiceId,
+            '画面理解服务 ID',
             128,
           ),
   }
@@ -268,6 +306,42 @@ async function validateManagedFramePath({
   return {
     imagePath: realImagePath,
     mimeType,
+  }
+}
+
+async function loadManagedFrameForAnalysis({
+  candidate,
+  mediaRoot,
+  fileSystem,
+}) {
+  const managedFrame = await validateManagedFramePath({
+    imagePath: candidate.imagePath,
+    mediaRoot,
+    fileSystem,
+  })
+  let imageBytes
+  try {
+    imageBytes = await fileSystem.readFile(managedFrame.imagePath)
+  } catch {
+    throw new AiVisualSearchError(
+      'AI_SEARCH_FILE_UNAVAILABLE',
+      '关键帧文件不可用，请重新建立视觉索引。',
+    )
+  }
+  if (imageBytes.byteLength < 1 || imageBytes.byteLength > MAX_IMAGE_BYTES) {
+    throw new AiVisualSearchError(
+      'AI_SEARCH_FILE_UNAVAILABLE',
+      '关键帧文件不可用，请重新建立视觉索引。',
+    )
+  }
+  return {
+    ...candidate,
+    ...managedFrame,
+    imageBytes,
+    imageFingerprint: crypto
+      .createHash('sha256')
+      .update(imageBytes)
+      .digest('hex'),
   }
 }
 
@@ -371,6 +445,29 @@ function frameCacheKey(candidate, providerFingerprint) {
     .digest('hex')
 }
 
+function analyzedFrameCacheKey(
+  candidate,
+  providerFingerprint,
+  imageFingerprint,
+) {
+  return crypto
+    .createHash('sha256')
+    .update('aurora-frame-analysis-v1')
+    .update('\0')
+    .update(providerFingerprint)
+    .update('\0')
+    .update(candidate.assetId)
+    .update('\0')
+    .update(candidate.sourceFingerprint)
+    .update('\0')
+    .update(candidate.frameId)
+    .update('\0')
+    .update(String(candidate.timeSeconds))
+    .update('\0')
+    .update(imageFingerprint)
+    .digest('hex')
+}
+
 function createEmptyCache() {
   return {
     version: AI_VISUAL_SEARCH_CACHE_VERSION,
@@ -439,6 +536,8 @@ function normalizeCacheEntry(entry) {
   const descriptionZh = normalizeDescription(entry.descriptionZh)
   const descriptionEn = normalizeDescription(entry.descriptionEn)
   const embeddingDimensions = Number(entry.embeddingDimensions)
+  const timeSeconds = Number(entry.timeSeconds)
+  const imageFingerprint = normalizeDescription(entry.imageFingerprint, 64)
   const validProviderFingerprint = /^[a-f0-9]{64}$/.test(providerFingerprint)
   const validDescriptionFingerprint = /^[a-f0-9]{64}$/.test(
     descriptionFingerprint,
@@ -475,6 +574,13 @@ function normalizeCacheEntry(entry) {
     descriptionEn,
     keywordsZh: normalizeStringList(entry.keywordsZh, 24, 120),
     keywordsEn: normalizeStringList(entry.keywordsEn, 24, 120),
+    timeSeconds:
+      entry.timeSeconds != null && Number.isFinite(timeSeconds) && timeSeconds >= 0
+        ? timeSeconds
+        : null,
+    imageFingerprint: /^[a-f0-9]{64}$/.test(imageFingerprint)
+      ? imageFingerprint
+      : null,
     embedding:
       normalizedDimensions == null
         ? null
@@ -1235,6 +1341,52 @@ function cosineSimilarity(left, right) {
   return dot / Math.sqrt(leftMagnitude * rightMagnitude)
 }
 
+function normalizeSearchText(value) {
+  return String(value ?? '')
+    .normalize('NFKC')
+    .toLocaleLowerCase('zh-CN')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+}
+
+function searchTerms(value) {
+  const normalized = normalizeSearchText(value)
+  if (!normalized) return []
+  const terms = normalized.match(/[\p{Script=Han}]+|[\p{L}\p{N}]+/gu) ?? []
+  return terms.filter((term) => term.length >= 2)
+}
+
+function hasLexicalSearchSupport(query, entry) {
+  const candidateText = normalizeSearchText([
+    entry.descriptionZh,
+    entry.descriptionEn,
+    ...entry.keywordsZh,
+    ...entry.keywordsEn,
+  ].join(' '))
+  if (!candidateText) return false
+  const normalizedQuery = normalizeSearchText(query)
+  if (normalizedQuery.length >= 2 && candidateText.includes(normalizedQuery)) {
+    return true
+  }
+  return searchTerms(query).some((term) => candidateText.includes(term))
+}
+
+function keepRelevantRankedItems(ranked, query) {
+  const eligible = ranked.filter((item) => {
+    const lexicalSupport = hasLexicalSearchSupport(query, item.entry)
+    if (lexicalSupport) return item.score >= MIN_LEXICAL_COSINE_SCORE
+    return (
+      item.score >= MIN_RELEVANT_COSINE_SCORE &&
+      item.relevanceMargin >= MIN_RELEVANCE_MARGIN_OVER_GENERIC
+    )
+  })
+  if (eligible.length === 0) return []
+  const strongestScore = eligible[0].score
+  return eligible.filter(
+    (item) => item.score >= strongestScore - RELEVANT_SCORE_BAND,
+  )
+}
+
 const CONNECTION_TEST_IMAGE_DATA_URLS = [
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAYAAADimHc4AAAA7UlEQVR4Ae3BsWnDAAAF0ctHlYZJ7/0L9V4jkCqkjVdwITgI997H1/fPH9GMqEZUI6oR1YhqRDWiGlGNqEZUI6oR1YhqRDWiGlGNqEZUI6qDm/1+PvjPzufFnUZUI6oR1YhqRDWiGlGNqEZUI6oR1YhqRDWiGlGNqEZUI6oR1YhqRDWiGlGNqEZUI6oR1YhqRDWiGlGNqEZUI6oR1YhqRDWiGlGNqEZUI6oR1YhqRDWiGlGNqEZUI6oR1YhqRDWiGlEd3Ox8XuR9I6oR1YhqRDWiGlGNqEZUI6oR1YhqRDWiGlGNqEZUI6oR1YjqBWVZCTO+iwdBAAAAAElFTkSuQmCC',
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAYAAADimHc4AAACE0lEQVR4Ae3BsY3lBgxF0bsP6oCVsC0WxLZYyIKOnNuYYMJ1YEii9Ifn/Pr919//sMaINUqsUWKNEmuUWKPEGiXWKLFGiTVKrFFijRJrlFijxBol1iixRok1SrycR/NmBy/g0fwXj+ZPKo0nO3goj+YMHs23SuNpDh7Eo7mSR/Ot0ngC8RAezZ08mic4GObRTPFovlQaUw6GeDRP4dF8qTTuJgZ4NE/k0dxN3MyjeTKP5k7iRh7NG3g0dxE38WjexKO5g7iBR/NG3s3VxMU8mjfzaK4k1ihxIY/mE3g0VxFrlLiIR/NJPJoriAt4NJ/IozmbWKPEGiVO5tF8Mo/mTGKNEmuUOJFH8xN4NGcRa5RYo8QaJdYosUaJNUqcxKP5STyaM4iTVBo/SaVxBrFGiTVKrFFijRJrlFijxIkqjZ+g0jiLWKPEGiVOVml8skrjTGKNEmuUuECl8YkqjbOJi1Qan6TSuIJYo8SFKo1PUGlcRaxR4mKVxptVGlcSN6g03qjSuJq4SaXxJpXGHcSNKo03qDTuIm5WaTxZpXEnMaDSeKJK424HQyqNLx7NtEpjysGwSuOLR3O3SmOaeIhK406VxhMcPEil8c2jOVul8TQHD1VpfPNo/q9K48kOXqDS+BOPptJ4K/FylcabiTVKrFFijRJrlFijxBol1iixRok1SqxRYo0Sa5RYo8QaJdYosUb9CzmjgqALeyqyAAAAAElFTkSuQmCC',
@@ -1466,6 +1618,139 @@ function createAiVisualSearchService({
     }
   }
 
+  async function executeAnalyzeFrames(rawRequest) {
+    const request = normalizeFrameAnalysisRequest(rawRequest)
+    if (request.candidates.length === 0) {
+      return {
+        frames: [],
+        analyzedFrameCount: 0,
+        newlyAnalyzedFrameCount: 0,
+      }
+    }
+
+    const {
+      vision: visionService,
+      legacyProfile,
+    } = await readActiveServiceBundle()
+    if (!visionService) {
+      throw new AiVisualSearchError(
+        'AI_SEARCH_VISION_PROFILE_NOT_CONFIGURED',
+        '请先在探索页设置中配置画面理解服务。',
+      )
+    }
+    const legacyProfileMatches =
+      !request.profileId ||
+      legacyProfile?.id === request.profileId ||
+      visionService.id === request.profileId
+    if (
+      !legacyProfileMatches ||
+      (request.visionProfileId &&
+        visionService.id !== request.visionProfileId)
+    ) {
+      throw new AiVisualSearchError(
+        'AI_SEARCH_PROFILE_CHANGED',
+        '分析期间画面理解服务发生了切换，请重新分析。',
+      )
+    }
+
+    const descriptionFingerprint = visionServiceFingerprint(visionService)
+    const preparedCandidates = []
+    for (const candidate of request.candidates) {
+      const prepared = await loadManagedFrameForAnalysis({
+        candidate,
+        mediaRoot,
+        fileSystem,
+      })
+      preparedCandidates.push({
+        ...prepared,
+        cacheKey: analyzedFrameCacheKey(
+          candidate,
+          descriptionFingerprint,
+          prepared.imageFingerprint,
+        ),
+        legacyCacheKey: frameCacheKey(candidate, descriptionFingerprint),
+      })
+    }
+
+    const cache = await readCache(cachePath, fileSystem)
+    const uniqueFrames = new Map()
+    for (const candidate of preparedCandidates) {
+      if (!uniqueFrames.has(candidate.cacheKey)) {
+        uniqueFrames.set(candidate.cacheKey, candidate)
+      }
+    }
+    const missingDescriptions = [...uniqueFrames.values()].filter(
+      (candidate) => {
+        const entry = cache.entries[candidate.cacheKey]
+        return !entry || entry.descriptionFingerprint !== descriptionFingerprint
+      },
+    )
+    let newlyAnalyzedFrameCount = 0
+
+    for (
+      let index = 0;
+      index < missingDescriptions.length;
+      index += VISION_BATCH_SIZE
+    ) {
+      const batch = missingDescriptions.slice(index, index + VISION_BATCH_SIZE)
+      const descriptions = await describeFrameBatch({
+        batch,
+        service: visionService,
+        fetchImpl,
+        fileSystem,
+        timeoutMs: requestTimeoutMs,
+        contactSheetComposer,
+      })
+      const updatedAt = now().toISOString()
+      for (let offset = 0; offset < batch.length; offset += 1) {
+        const candidate = batch[offset]
+        const entry = {
+          assetId: candidate.assetId,
+          sourceFingerprint: candidate.sourceFingerprint,
+          frameId: candidate.frameId,
+          providerFingerprint: null,
+          descriptionFingerprint,
+          embeddingFingerprint: null,
+          ...descriptions[offset],
+          timeSeconds: candidate.timeSeconds,
+          imageFingerprint: candidate.imageFingerprint,
+          embedding: null,
+          embeddingDimensions: null,
+          updatedAt,
+        }
+        cache.entries[candidate.cacheKey] = entry
+        // Keep the legacy search key current as a compatibility alias. The
+        // analysis entry itself never trusts that weaker key because it lacks
+        // timestamp and image-content identity.
+        cache.entries[candidate.legacyCacheKey] = { ...entry }
+      }
+      newlyAnalyzedFrameCount += batch.length
+      const batchNumber = Math.floor(index / VISION_BATCH_SIZE) + 1
+      const isFinalBatch = index + batch.length >= missingDescriptions.length
+      if (isFinalBatch || batchNumber % 10 === 0) {
+        await writeCacheAtomically(cachePath, cache, fileSystem)
+      }
+    }
+
+    return {
+      frames: preparedCandidates.map((candidate) => {
+        const entry = cache.entries[candidate.cacheKey]
+        return {
+          resultId: candidate.resultId,
+          assetId: candidate.assetId,
+          frameId: candidate.frameId,
+          timeSeconds: candidate.timeSeconds,
+          descriptionZh: entry.descriptionZh,
+          descriptionEn: entry.descriptionEn,
+          keywordsZh: [...entry.keywordsZh],
+          keywordsEn: [...entry.keywordsEn],
+        }
+      }),
+      analyzedFrameCount: preparedCandidates.length,
+      newlyAnalyzedFrameCount,
+    }
+  }
+
   async function executeSearch(rawRequest) {
     const request = normalizeSearchRequest(rawRequest)
     if (request.candidates.length === 0) {
@@ -1587,12 +1872,16 @@ function createAiVisualSearchService({
     }
 
     const queryResult = await createEmbeddings({
-      input: [`寻找符合以下自然语言要求的影视画面：${request.query}`],
+      input: [
+        `寻找符合以下自然语言要求的影视画面：${request.query}`,
+        GENERIC_VISUAL_BASELINE_TEXT,
+      ],
       service: embeddingService,
       fetchImpl,
       timeoutMs: requestTimeoutMs,
     })
     const queryEmbedding = queryResult.embeddings[0]
+    const genericVisualEmbedding = queryResult.embeddings[1]
     const queryDimensions = queryResult.dimensions
 
     const missingEmbeddings = [...uniqueFrames.values()].filter((candidate) => {
@@ -1644,10 +1933,13 @@ function createAiVisualSearchService({
           entry.embeddingFingerprint !== embeddingFingerprint ||
           entry.embeddingDimensions !== queryDimensions
         ) return null
+        const score = cosineSimilarity(queryEmbedding, entry.embedding)
         return {
           candidate,
           entry,
-          score: cosineSimilarity(queryEmbedding, entry.embedding),
+          score,
+          relevanceMargin:
+            score - cosineSimilarity(genericVisualEmbedding, entry.embedding),
         }
       })
       .filter(Boolean)
@@ -1656,9 +1948,10 @@ function createAiVisualSearchService({
         return left.candidate.timeSeconds - right.candidate.timeSeconds
       })
 
+    const relevantRanked = keepRelevantRankedItems(ranked, request.query)
     const selected = []
     const selectedTimesByClip = new Map()
-    for (const item of ranked) {
+    for (const item of relevantRanked) {
       const clipKey = item.candidate.clipId || item.candidate.assetId
       const selectedTimes = selectedTimesByClip.get(clipKey) ?? []
       if (
@@ -1704,8 +1997,21 @@ function createAiVisualSearchService({
     return task
   }
 
+  function analyzeFrames(request) {
+    const task = operationQueue.then(
+      () => executeAnalyzeFrames(request),
+      () => executeAnalyzeFrames(request),
+    )
+    operationQueue = task.then(
+      () => undefined,
+      () => undefined,
+    )
+    return task
+  }
+
   return {
     search,
+    analyzeFrames,
     testProfile,
     testVisionProfile,
     testEmbeddingProfile,

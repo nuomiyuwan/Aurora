@@ -134,12 +134,42 @@ export type PageSettingsPanelProps = {
   particleImportState?: ParticleImportState
   onChooseParticleMedia?: () => void
   onRemoveCustomParticleMedia?: () => void
+  appUpdateState?: AppUpdateState
+  onCheckForUpdates?: () => void
   onChange: (patch: Partial<PageVisualSettings>) => void
   onParticlesChange: (patch: Partial<HomeParticleSettings>) => void
 }
 
 const RANGE_THUMB_SIZE = 11
 const RANGE_THUMB_HIT_PADDING = 4
+
+const FALLBACK_APP_UPDATE_STATE: AppUpdateState = {
+  currentVersion: __AURORA_VERSION__,
+  supported: false,
+  status: 'unsupported',
+  latestVersion: null,
+  releaseName: null,
+  releaseNotes: [],
+  releaseDate: null,
+  progress: null,
+  checkedAt: null,
+  source: null,
+  error: null,
+}
+
+function appUpdateButtonLabel(state: AppUpdateState) {
+  if (!state.supported) return '当前版本'
+  if (state.status === 'checking') return '正在检查…'
+  if (state.status === 'up-to-date') return '已是最新'
+  if (state.status === 'available') return `更新到 v${state.latestVersion ?? ''}`
+  if (state.status === 'downloading') {
+    return `下载 ${Math.round(state.progress ?? 0)}%`
+  }
+  if (state.status === 'downloaded') return '准备安装…'
+  if (state.status === 'installing') return '正在重启…'
+  if (state.status === 'error') return '重新检查'
+  return '检查更新'
+}
 
 type RangeThumbDoubleClickState = {
   firstPressHit: boolean
@@ -652,6 +682,8 @@ export function PageSettingsPanel({
   particleImportState = { status: 'idle', message: null },
   onChooseParticleMedia,
   onRemoveCustomParticleMedia,
+  appUpdateState = FALLBACK_APP_UPDATE_STATE,
+  onCheckForUpdates,
   onChange,
   onParticlesChange,
 }: PageSettingsPanelProps) {
@@ -1343,6 +1375,32 @@ export function PageSettingsPanel({
       </div>
 
         <footer className="pageSettingsFooter">
+          <div className="pageSettingsVersionRow">
+            <span>
+              <strong>Aurora</strong>
+              <small>版本 {appUpdateState.currentVersion}</small>
+            </span>
+            <button
+              type="button"
+              disabled={
+                !appUpdateState.supported ||
+                appUpdateState.status === 'checking' ||
+                appUpdateState.status === 'downloading' ||
+                appUpdateState.status === 'downloaded' ||
+                appUpdateState.status === 'installing'
+              }
+              onClick={onCheckForUpdates}
+            >
+              {appUpdateButtonLabel(appUpdateState)}
+            </button>
+          </div>
+          {appUpdateState.status === 'error' &&
+            appUpdateState.source !== 'automatic' &&
+            appUpdateState.error && (
+            <p className="pageSettingsUpdateError" role="status">
+              {appUpdateState.error}
+            </p>
+          )}
           <button
             className="pageSettingsResetButton uiGlassInset uiGlassInteractive"
             type="button"

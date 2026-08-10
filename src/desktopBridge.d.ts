@@ -131,6 +131,8 @@ declare global {
     | 'AI_SEARCH_NETWORK_ERROR'
     | 'AI_SEARCH_PROFILE_CHANGED'
     | 'AI_SEARCH_PROFILE_NOT_CONFIGURED'
+    | 'AI_SEARCH_VISION_PROFILE_NOT_CONFIGURED'
+    | 'AI_SEARCH_EMBEDDING_PROFILE_NOT_CONFIGURED'
     | 'AI_SEARCH_PROVIDER_ERROR'
     | 'AI_SEARCH_RATE_LIMITED'
     | 'AI_SEARCH_REQUEST_TOO_LARGE'
@@ -138,6 +140,7 @@ declare global {
     | 'AI_SEARCH_TIMEOUT'
     | 'AI_SEARCH_UNKNOWN'
     | 'AI_SEARCH_UNSUPPORTED_IMAGE'
+    | 'AI_SEARCH_RETRY_EXHAUSTED'
 
   interface AiVisualSearchPublicError {
     code: AiVisualSearchErrorCode
@@ -163,6 +166,7 @@ declare global {
     projectTitle: string
     tags: string[]
     note: string
+    analysisTier: 'thumbnail' | 'visual-index'
   }
 
   interface AiVisualSearchRequest {
@@ -189,6 +193,29 @@ declare global {
     indexedFrameCount: number
     newlyAnalyzedFrameCount: number
     semanticQuery: string
+  }
+
+  interface AiVisualFrameAnalysisRequest {
+    candidates: AiVisualFrameCandidate[]
+    profileId?: string | null
+    visionProfileId?: string | null
+  }
+
+  interface AiVisualFrameAnalysis {
+    resultId: string
+    assetId: string
+    frameId: string
+    timeSeconds: number
+    descriptionZh: string
+    descriptionEn: string
+    keywordsZh: string[]
+    keywordsEn: string[]
+  }
+
+  interface AiVisualFrameAnalysisResponse {
+    frames: AiVisualFrameAnalysis[]
+    analyzedFrameCount: number
+    newlyAnalyzedFrameCount: number
   }
 
   type EmbyErrorCode =
@@ -476,6 +503,98 @@ declare global {
     createdAt: string
   }
 
+  type FrameQualitySensitivity =
+    | 'conservative'
+    | 'balanced'
+    | 'aggressive'
+
+  interface FrameQualityInputFrame {
+    frameId: string
+    imagePath: string
+    timeSeconds: number
+  }
+
+  interface FrameQualityAnalysisRequest {
+    frames: FrameQualityInputFrame[]
+    sensitivity?: FrameQualitySensitivity
+  }
+
+  interface FrameQualityMetrics {
+    lumaMean: number
+    lumaStdDev: number
+    lumaP01: number
+    lumaP05: number
+    lumaP50: number
+    lumaP95: number
+    lumaP99: number
+    darkPixelRatio: number
+    brightPixelRatio: number
+    edgeDensity: number
+    edgeEnergy: number
+    qualityScore: number
+  }
+
+  interface FrameBlankCandidate {
+    kind: 'black' | 'white'
+    confidence: number
+    reason: string
+  }
+
+  interface FrameQualityAnalysisFrame extends FrameQualityInputFrame {
+    width: number
+    height: number
+    metrics: FrameQualityMetrics
+    blankCandidate: FrameBlankCandidate | null
+  }
+
+  interface FrameQualityBlankCandidate extends FrameBlankCandidate {
+    frameId: string
+    timeSeconds: number
+    metrics: FrameQualityMetrics
+  }
+
+  interface FrameDuplicateComparisonMetrics {
+    hashDistance: number
+    hashDistanceRatio: number
+    pixelMae: number
+    pixelRmse: number
+    colorMae: number
+    gradientMae: number
+    correlation: number
+    similarity: number
+  }
+
+  interface FrameDuplicateGroupMember {
+    frameId: string
+    timeSeconds: number
+    comparedToFrameId: string
+    qualityScore: number
+    metrics: FrameDuplicateComparisonMetrics
+  }
+
+  interface FrameDuplicateGroup {
+    groupId: string
+    keepFrameId: string
+    removeFrameIds: string[]
+    confidence: number
+    reason: string
+    representative: {
+      frameId: string
+      timeSeconds: number
+      qualityScore: number
+    }
+    members: FrameDuplicateGroupMember[]
+  }
+
+  interface FrameQualityAnalysisResponse {
+    version: number
+    sensitivity: FrameQualitySensitivity
+    analyzedFrameCount: number
+    frames: FrameQualityAnalysisFrame[]
+    blankCandidates: FrameQualityBlankCandidate[]
+    duplicateGroups: FrameDuplicateGroup[]
+  }
+
   interface MediaPreviewResult {
     operationId: string
     cached: boolean
@@ -603,6 +722,7 @@ declare global {
     | 'tencent'
     | 'xinpianchang'
     | 'youku'
+    | 'douyin'
 
   type OnlineProviderCapability =
     | 'official-playback'
@@ -610,7 +730,7 @@ declare global {
     | 'pagination'
     | 'account'
     | 'episodes'
-    | 'poster-reflection'
+    | 'player-frame-reflection'
 
   interface OnlineProviderManifestDescriptor {
     schemaVersion: 1
@@ -649,6 +769,8 @@ declare global {
     query: string
     limit?: number
     page?: number
+    /** Provider-specific result category; omitted is equivalent to `all`. */
+    searchType?: string
   }
 
   interface OnlineProviderSearchResponse {
@@ -688,6 +810,7 @@ declare global {
     limit?: number
     /** One-based page number; omitted uses the first page. */
     page?: number
+    searchType?: 'all' | 'video' | 'bangumi' | 'film' | 'live'
   }
 
   interface BilibiliSearchResponse {
@@ -734,8 +857,49 @@ declare global {
     mediaId: string
   }
 
+  interface XinpianchangEmbeddedFrameRequest {
+    kind: 'video'
+    mediaId: string
+  }
+
+  interface YoukuEmbeddedFrameRequest {
+    kind: 'video' | 'episode'
+    mediaId: string
+  }
+
+  type AppUpdateStatus =
+    | 'idle'
+    | 'unsupported'
+    | 'checking'
+    | 'up-to-date'
+    | 'available'
+    | 'downloading'
+    | 'downloaded'
+    | 'installing'
+    | 'error'
+
+  interface AppUpdateState {
+    currentVersion: string
+    supported: boolean
+    status: AppUpdateStatus
+    latestVersion: string | null
+    releaseName: string | null
+    releaseNotes: string[]
+    releaseDate: string | null
+    progress: number | null
+    checkedAt: string | null
+    source: 'automatic' | 'manual' | 'install' | null
+    error: string | null
+  }
+
   interface DesktopBridge {
     platform: 'aix' | 'android' | 'darwin' | 'freebsd' | 'haiku' | 'linux' | 'openbsd' | 'sunos' | 'win32' | 'cygwin' | 'netbsd'
+    getAppUpdateState(): Promise<AppUpdateState>
+    checkForAppUpdate(): Promise<AppUpdateState>
+    downloadAndInstallAppUpdate(): Promise<AppUpdateState>
+    onAppUpdateStateChange(
+      listener: (state: AppUpdateState) => void,
+    ): () => void
     minimizeWindow(): void
     toggleMaximizeWindow(): Promise<boolean>
     getWindowMaximizedState(): Promise<boolean>
@@ -795,6 +959,9 @@ declare global {
     buildVisualIndex(
       request: VisualIndexBuildRequest,
     ): Promise<VisualIndexBuildResult>
+    analyzeFrameQuality(
+      request: FrameQualityAnalysisRequest,
+    ): Promise<FrameQualityAnalysisResponse>
     cancelMediaOperation(operationId: string): Promise<boolean>
     exportStill(request: StillExportRequest): Promise<StillExportResult>
     exportClip(request: ClipExportRequest): Promise<ClipExportResult>
@@ -842,6 +1009,12 @@ declare global {
     ): Promise<TencentVideoSearchResponse>
     captureTencentEmbeddedFrame(
       request: TencentEmbeddedFrameRequest,
+    ): Promise<string | null>
+    captureXinpianchangEmbeddedFrame(
+      request: XinpianchangEmbeddedFrameRequest,
+    ): Promise<string | null>
+    captureYoukuEmbeddedFrame(
+      request: YoukuEmbeddedFrameRequest,
     ): Promise<string | null>
     onBilibiliSelection(
       listener: (descriptor: BilibiliSelectionDescriptor) => void,
@@ -896,6 +1069,9 @@ declare global {
     searchAiVisualFrames(
       request: AiVisualSearchRequest,
     ): Promise<AiVisualSearchResult<AiVisualSearchResponse>>
+    analyzeAiVisualFrames(
+      request: AiVisualFrameAnalysisRequest,
+    ): Promise<AiVisualSearchResult<AiVisualFrameAnalysisResponse>>
     getEmbyConnection(): Promise<EmbyResult<EmbyConnectionState>>
     testEmbyConnection(
       request: EmbyConnectionRequest,

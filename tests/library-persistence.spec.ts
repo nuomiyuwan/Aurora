@@ -7,6 +7,7 @@ import {
 import {
   MEDIA_VISUAL_INDEX_VERSION,
   type FrameAnnotation,
+  type FrameExclusion,
   type MediaAsset,
   type MediaVisualIndex,
 } from '../src/data/mediaLibraryTypes'
@@ -42,10 +43,11 @@ test('无封面空项目可持久化并在重启后恢复', () => {
   expect(restored?.selectedProjectId).toBe(project.id)
   expect(restored?.visualIndexes).toEqual([])
   expect(restored?.frameAnnotations).toEqual([])
+  expect(restored?.frameExclusions).toEqual([])
   expect(restored?.projectCovers).toEqual({})
 })
 
-test('schema v4 自定义项目封面可跨平台 roundtrip', () => {
+test('schema v5 自定义项目封面可跨平台 roundtrip', () => {
   const projects = [
     {
       id: 'cover-posix',
@@ -106,7 +108,7 @@ test('schema v4 自定义项目封面可跨平台 roundtrip', () => {
   )
 })
 
-test('schema v2 迁移到 v4 时自定义项目封面默认为空', () => {
+test('schema v2 迁移到 v5 时自定义项目封面默认为空', () => {
   const project = {
     id: 'v2-cover-project',
     title: '旧版项目',
@@ -140,7 +142,7 @@ test('schema v2 迁移到 v4 时自定义项目封面默认为空', () => {
   expect(restored?.projectCovers).toEqual({})
 })
 
-test('schema v4 过滤非法与孤儿项目封面', () => {
+test('schema v5 过滤非法与孤儿项目封面', () => {
   const projectIds = [
     'valid-project',
     'relative-path-project',
@@ -491,6 +493,8 @@ test('旧演示素材迁移时只删除 mock 数据并保留真实素材索引',
     rating: 5,
     tags: ['保留'],
     note: '真实标注',
+    tagsSource: 'manual',
+    noteSource: 'manual',
   }
   const serialized = serializePersistentLibrary({
     projects: [project],
@@ -543,7 +547,7 @@ test('恢复时固定补齐五个默认封面项目并保留用户项目', () =>
   expect(restored[5]).toEqual(userProject)
 })
 
-test('schema v1 媒体库迁移到 v4 并清除无索引的旧抽帧计数', () => {
+test('schema v1 媒体库迁移到 v5 并清除无索引的旧抽帧计数', () => {
   const project = {
     id: 'legacy-project',
     title: '旧项目',
@@ -729,7 +733,7 @@ test('真实素材的索引帧数只由当前有效视觉索引决定', () => {
   expect(staleFingerprint?.mediaAssets[0].sampleCount).toBe(0)
 })
 
-test('schema v4 可完整 roundtrip 且保留视觉索引的绝对受管路径', () => {
+test('schema v5 可完整 roundtrip 且保留视觉索引的绝对受管路径', () => {
   const project = {
     id: 'indexed-project',
     title: '索引项目',
@@ -805,6 +809,8 @@ test('schema v4 可完整 roundtrip 且保留视觉索引的绝对受管路径',
     rating: 4,
     tags: ['逆光', '人物'],
     note: '保留这一帧',
+    tagsSource: 'manual',
+    noteSource: 'manual',
   }
 
   const serialized = serializePersistentLibrary({
@@ -845,7 +851,246 @@ test('schema v4 可完整 roundtrip 且保留视觉索引的绝对受管路径',
   })
 })
 
-test('schema v4 过滤失效外键、坏帧、重复帧与坏标注', () => {
+test('schema v5 可持久化可撤销帧排除并过滤失效素材、帧与指纹', () => {
+  const project = {
+    id: 'frame-exclusion-project',
+    title: '智能整理',
+    subtitle: '',
+    cover: '',
+    videoCount: 1,
+    collectionCount: 0,
+    updatedAt: '2026-08-10 14:00',
+  }
+  const asset: MediaAsset = {
+    id: 'frame-exclusion-asset',
+    filename: 'cleanup.mov',
+    thumbnail: '/managed/cleanup/poster.jpg',
+    duration: '00:12',
+    resolution: '1920 x 1080',
+    fps: '24 fps',
+    frameCount: '288',
+    sampleCount: 3,
+    size: '18 MB',
+    codec: 'H.264',
+    camera: '未知设备',
+    capturedAt: '2026-08-10 14:00',
+    sourceFingerprint: 'local:/Volumes/Media/cleanup.mov:18874368',
+    sourcePath: '/Volumes/Media/cleanup.mov',
+    favorite: false,
+    indexTask: 'idle',
+    durationSeconds: 12,
+    width: 1920,
+    height: 1080,
+    fpsValue: 24,
+    sizeBytes: 18 * 1024 ** 2,
+    indexError: null,
+  }
+  const frames = [
+    {
+      id: 'cleanup-frame-0',
+      index: 0,
+      timeSeconds: 0,
+      imagePath: '/managed/cleanup/frames/000000.jpg',
+    },
+    {
+      id: 'cleanup-frame-1',
+      index: 1,
+      timeSeconds: 4,
+      imagePath: '/managed/cleanup/frames/000001.jpg',
+    },
+    {
+      id: 'cleanup-frame-2',
+      index: 2,
+      timeSeconds: 8,
+      imagePath: '/managed/cleanup/frames/000002.jpg',
+    },
+  ]
+  const exclusions: FrameExclusion[] = [
+    {
+      assetId: asset.id,
+      sourceFingerprint: asset.sourceFingerprint,
+      frameId: frames[0].id,
+      reason: 'black',
+      duplicateOfFrameId: null,
+      createdAt: '2026-08-10T06:00:00.000Z',
+    },
+    {
+      assetId: asset.id,
+      sourceFingerprint: asset.sourceFingerprint,
+      frameId: frames[2].id,
+      reason: 'duplicate',
+      duplicateOfFrameId: frames[1].id,
+      createdAt: '2026-08-10T06:00:01.000Z',
+    },
+  ]
+  const serialized = serializePersistentLibrary({
+    projects: [project],
+    mediaAssets: [asset],
+    projectAssetRefs: [
+      {
+        id: 'frame-exclusion-ref',
+        projectId: project.id,
+        assetId: asset.id,
+        order: 0,
+        thumbnailFollowsProject: true,
+        tags: [],
+        annotated: false,
+        note: '',
+      },
+    ],
+    visualIndexes: [
+      {
+        assetId: asset.id,
+        sourceFingerprint: asset.sourceFingerprint,
+        createdAt: '2026-08-10T05:59:00.000Z',
+        version: MEDIA_VISUAL_INDEX_VERSION,
+        posterPath: '/managed/cleanup/poster.jpg',
+        previewPath: '/managed/cleanup/preview.mp4',
+        frames,
+      },
+    ],
+    frameExclusions: exclusions,
+    projectTitles: {},
+    selectedProjectId: project.id,
+  })
+
+  expect(parsePersistentLibrary({ library: serialized })?.frameExclusions)
+    .toEqual(exclusions)
+
+  const restored = parsePersistentLibrary({
+    library: {
+      ...serialized,
+      frameExclusions: [
+        ...exclusions,
+        { ...exclusions[0], reason: 'white' },
+        { ...exclusions[0], assetId: 'missing-asset' },
+        { ...exclusions[0], sourceFingerprint: 'stale-source' },
+        { ...exclusions[0], frameId: 'missing-frame' },
+        {
+          ...exclusions[1],
+          duplicateOfFrameId: 'missing-frame',
+        },
+        {
+          ...exclusions[1],
+          duplicateOfFrameId: exclusions[1].frameId,
+        },
+        {
+          ...exclusions[0],
+          duplicateOfFrameId: frames[1].id,
+        },
+      ],
+    },
+  })
+
+  expect(restored?.frameExclusions).toEqual(exclusions)
+})
+
+test('schema v4 标注迁移为手动来源且不会恢复帧排除', () => {
+  const project = {
+    id: 'legacy-annotation-project',
+    title: '旧标注',
+    subtitle: '',
+    cover: '',
+    videoCount: 1,
+    collectionCount: 0,
+    updatedAt: '2026-08-10 14:10',
+  }
+  const asset: MediaAsset = {
+    id: 'legacy-annotation-asset',
+    filename: 'legacy.mov',
+    thumbnail: '/managed/legacy-annotation/poster.jpg',
+    duration: '00:05',
+    resolution: '1920 x 1080',
+    fps: '24 fps',
+    frameCount: '120',
+    sampleCount: 1,
+    size: '8 MB',
+    codec: 'H.264',
+    camera: '未知设备',
+    capturedAt: '2026-08-10 14:10',
+    sourceFingerprint: 'legacy-annotation-source',
+    sourcePath: '/Volumes/Media/legacy.mov',
+    favorite: false,
+    indexTask: 'idle',
+    durationSeconds: 5,
+    width: 1920,
+    height: 1080,
+    fpsValue: 24,
+    sizeBytes: 8 * 1024 ** 2,
+    indexError: null,
+  }
+  const frame = {
+    id: 'legacy-frame-0',
+    index: 0,
+    timeSeconds: 1,
+    imagePath: '/managed/legacy-annotation/frames/000000.jpg',
+  }
+  const current = serializePersistentLibrary({
+    projects: [project],
+    mediaAssets: [asset],
+    projectAssetRefs: [],
+    visualIndexes: [
+      {
+        assetId: asset.id,
+        sourceFingerprint: asset.sourceFingerprint,
+        createdAt: '2026-08-10T06:10:00.000Z',
+        version: MEDIA_VISUAL_INDEX_VERSION,
+        posterPath: '/managed/legacy-annotation/poster.jpg',
+        previewPath: null,
+        frames: [frame],
+      },
+    ],
+    frameAnnotations: [
+      {
+        assetId: asset.id,
+        frameId: frame.id,
+        favorite: false,
+        rating: 0,
+        tags: ['用户标签'],
+        note: '用户备注',
+      },
+    ],
+    frameExclusions: [
+      {
+        assetId: asset.id,
+        sourceFingerprint: asset.sourceFingerprint,
+        frameId: frame.id,
+        reason: 'manual',
+        duplicateOfFrameId: null,
+        createdAt: '2026-08-10T06:11:00.000Z',
+      },
+    ],
+    projectTitles: {},
+    selectedProjectId: project.id,
+  })
+  const legacyAnnotation = {
+    assetId: asset.id,
+    frameId: frame.id,
+    favorite: false,
+    rating: 0,
+    tags: ['用户标签'],
+    note: '用户备注',
+  }
+  const restored = parsePersistentLibrary({
+    library: {
+      ...current,
+      schemaVersion: 4,
+      frameAnnotations: [legacyAnnotation],
+    },
+  })
+
+  expect(restored?.schemaVersion).toBe(LIBRARY_SCHEMA_VERSION)
+  expect(restored?.frameAnnotations).toEqual([
+    {
+      ...legacyAnnotation,
+      tagsSource: 'manual',
+      noteSource: 'manual',
+    },
+  ])
+  expect(restored?.frameExclusions).toEqual([])
+})
+
+test('schema v5 过滤失效外键、坏帧、重复帧与坏标注', () => {
   const project = {
     id: 'strict-project',
     title: '严格校验',
@@ -959,6 +1204,8 @@ test('schema v4 过滤失效外键、坏帧、重复帧与坏标注', () => {
         rating: 5,
         tags: ['保留'],
         note: '',
+        tagsSource: 'manual',
+        noteSource: 'manual',
       },
       {
         assetId: asset.id,
@@ -994,11 +1241,13 @@ test('schema v4 过滤失效外键、坏帧、重复帧与坏标注', () => {
       rating: 5,
       tags: ['保留'],
       note: '',
+      tagsSource: 'manual',
+      noteSource: 'manual',
     },
   ])
 })
 
-test('schema v3 媒体库迁移到 v4 并保留 v3 封面', () => {
+test('schema v3 媒体库迁移到 v5 并保留 v3 封面', () => {
   const project = {
     id: 'v3-online-migration-project',
     title: '旧版媒体库',
@@ -1050,7 +1299,7 @@ test('schema v3 媒体库迁移到 v4 并保留 v3 封面', () => {
     library: { ...current, schemaVersion: 3 },
   })
 
-  expect(restored?.schemaVersion).toBe(4)
+  expect(restored?.schemaVersion).toBe(LIBRARY_SCHEMA_VERSION)
   expect(restored?.mediaAssets).toEqual([legacyAsset])
   expect(restored?.mediaAssets[0].online).toBeUndefined()
   expect(restored?.projectCovers).toEqual(current.projectCovers)

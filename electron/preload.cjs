@@ -25,6 +25,16 @@ function encodeMediaPath(filePath) {
 
 contextBridge.exposeInMainWorld('desktopBridge', {
   platform: process.platform,
+  getAppUpdateState: () => ipcRenderer.invoke('app-update:get-state'),
+  checkForAppUpdate: () => ipcRenderer.invoke('app-update:check'),
+  downloadAndInstallAppUpdate: () =>
+    ipcRenderer.invoke('app-update:download-and-install'),
+  onAppUpdateStateChange: (listener) => {
+    if (typeof listener !== 'function') return () => {}
+    const handler = (_event, state) => listener(state)
+    ipcRenderer.on('app-update:state', handler)
+    return () => ipcRenderer.removeListener('app-update:state', handler)
+  },
   minimizeWindow: () => ipcRenderer.send('window-controls:minimize'),
   toggleMaximizeWindow: () =>
     ipcRenderer.invoke('window-controls:toggle-maximize'),
@@ -168,6 +178,8 @@ contextBridge.exposeInMainWorld('desktopBridge', {
   ensureMediaPreview: (request) =>
     ipcRenderer.invoke('media-preview:ensure', request),
   buildVisualIndex: (request) => ipcRenderer.invoke('media-index:build', request),
+  analyzeFrameQuality: (request) =>
+    ipcRenderer.invoke('frame-intelligence:analyze-quality', request),
   cancelMediaOperation: (operationId) =>
     ipcRenderer.invoke('media-operation:cancel', { operationId }),
   exportStill: (request) => ipcRenderer.invoke('media-still:export', request),
@@ -225,6 +237,10 @@ contextBridge.exposeInMainWorld('desktopBridge', {
     ipcRenderer.invoke('tencent:search', request),
   captureTencentEmbeddedFrame: (request) =>
     ipcRenderer.invoke('tencent:embedded:capture', request),
+  captureXinpianchangEmbeddedFrame: (request) =>
+    ipcRenderer.invoke('xinpianchang:embedded:capture', request),
+  captureYoukuEmbeddedFrame: (request) =>
+    ipcRenderer.invoke('youku:embedded:capture', request),
   onBilibiliSelection: (listener) => {
     if (typeof listener !== 'function') return () => {}
     const handler = (_event, descriptor) => listener(descriptor)
@@ -275,6 +291,8 @@ contextBridge.exposeInMainWorld('desktopBridge', {
     ipcRenderer.invoke('ai:local-models:detect'),
   searchAiVisualFrames: (request) =>
     ipcRenderer.invoke('ai:visual-search:search', request),
+  analyzeAiVisualFrames: (request) =>
+    ipcRenderer.invoke('ai:visual-search:analyze-frames', request),
   getEmbyConnection: () => ipcRenderer.invoke('emby:connection:get'),
   testEmbyConnection: (request) => ipcRenderer.invoke('emby:connection:test', request),
   disconnectEmby: () => ipcRenderer.invoke('emby:connection:disconnect'),

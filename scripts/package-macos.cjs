@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 const { spawnSync } = require('node:child_process')
-const { existsSync, readFileSync } = require('node:fs')
-const { join, resolve } = require('node:path')
+const { existsSync, readFileSync, rmSync, rmdirSync } = require('node:fs')
+const { dirname, join, resolve } = require('node:path')
 
 const projectDir = resolve(__dirname, '..')
 const electronBuilder = join(projectDir, 'node_modules', '.bin', 'electron-builder')
@@ -24,8 +24,18 @@ if (process.platform !== 'darwin') {
 const outputDir = resolve(projectDir, process.env.AURORA_MAC_OUTPUT || 'release')
 const hasSigningIdentity = hasDeveloperIdSigningIdentity()
 const builderArgs = ['--mac']
+const appDirName = arch === 'arm64' ? 'mac-arm64' : 'mac'
+const appPath = join(outputDir, appDirName, 'Aurora.app')
+let shouldCleanupStagingApp = targetMode === 'installer'
 
-if (targetMode === 'installer') builderArgs.push('dmg')
+if (shouldCleanupStagingApp) cleanupStagingApp(appPath)
+process.on('exit', () => {
+  if (shouldCleanupStagingApp) cleanupStagingApp(appPath)
+})
+
+// Squirrel.Mac consumes the ZIP target and latest-mac.yml for application
+// updates. The DMG remains the installer people download manually.
+if (targetMode === 'installer') builderArgs.push('dmg', 'zip')
 else builderArgs.push('--dir')
 
 builderArgs.push(
@@ -50,15 +60,21 @@ if (!hasSigningIdentity) {
 
 run(electronBuilder, builderArgs)
 
-const appDirName = arch === 'arm64' ? 'mac-arm64' : 'mac'
-const appPath = join(outputDir, appDirName, 'Aurora.app')
 verifyApp(appPath)
 
 if (targetMode === 'installer') {
   const artifactBase = `Aurora-macOS-${packageMetadata.version}-${arch}`
   const dmgPath = join(outputDir, `${artifactBase}.dmg`)
+  const zipPath = join(outputDir, `${artifactBase}.zip`)
 
   run('hdiutil', ['verify', dmgPath])
+  if (!existsSync(zipPath)) {
+    console.error(`Expected macOS update archive was not created: ${zipPath}`)
+    process.exit(1)
+  }
+
+  cleanupStagingApp(appPath)
+  shouldCleanupStagingApp = false
 }
 
 console.log(`Verified ${arch} macOS package output: ${outputDir}`)
@@ -87,6 +103,27 @@ function run(command, args, options = {}) {
 
   if (result.error) throw result.error
   if (result.status !== 0) process.exit(result.status ?? 1)
+}
+
+function cleanupStagingApp(candidatePath) {
+  if (!existsSync(candidatePath)) return
+
+  const launchServicesRegister =
+    '/System/Library/Frameworks/CoreServices.framework/Frameworks/' +
+    'LaunchServices.framework/Support/lsregister'
+
+  spawnSync(launchServicesRegister, ['-u', candidatePath], {
+    cwd: projectDir,
+    env: process.env,
+    stdio: 'ignore',
+  })
+
+  rmSync(candidatePath, { recursive: true, force: true })
+  try {
+    rmdirSync(dirname(candidatePath))
+  } catch {
+    // Keep the staging directory when Electron Builder left other files there.
+  }
 }
 
 function verifyApp(candidatePath) {

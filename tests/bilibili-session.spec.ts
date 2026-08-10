@@ -45,7 +45,7 @@ const {
     limit: number,
     mixinKey: string,
     timestampSeconds: number,
-    searchType?: 'video' | 'media_bangumi',
+    searchType?: 'video' | 'media_bangumi' | 'media_ft',
     page?: number,
   ): string
   createBilibiliSearchUrl(query: string): string
@@ -95,7 +95,12 @@ const {
     getAuthState(): Promise<{ signedIn: boolean }>
     logout(): Promise<{ signedIn: boolean }>
     openLogin(): Promise<{ signedIn: boolean }>
-    searchVideos(request: { query: string; limit?: number; page?: number }): Promise<{
+    searchVideos(request: {
+      query: string
+      limit?: number
+      page?: number
+      searchType?: 'all' | 'video' | 'bangumi' | 'film' | 'live'
+    }): Promise<{
       query: string
       page: number
       pageSize: number
@@ -468,6 +473,21 @@ test('creates a deterministic WBI-signed official bangumi search URL', () => {
   expect(() =>
     createBilibiliBangumiSearchApiUrl('test', 19, mixinKey, 1_722_680_000),
   ).toThrow()
+})
+
+test('accepts the reviewed Bilibili film search stream', () => {
+  const mixinKey = createMixinKey(
+    '7cd084941338484aae1ad9425b84077c',
+    '4932caff0ff746eab6f01bf08b70ac45',
+  )
+  const url = new URL(createBilibiliSearchApiUrl(
+    '电影',
+    12,
+    mixinKey,
+    1_722_680_000,
+    'media_ft',
+  ))
+  expect(url.searchParams.get('search_type')).toBe('media_ft')
 })
 
 test('normalizes bounded Bilibili search pagination metadata', () => {
@@ -1578,6 +1598,74 @@ test('search still returns bangumi when the video search branch fails', async ()
       query: '番剧',
       results: [expect.objectContaining({ kind: 'episode', mediaId: '778899' })],
     })
+  } finally {
+    await rm(sandbox, { recursive: true, force: true })
+  }
+})
+
+test('live category safely enters the manager and returns no unsupported playback items', async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), 'aurora-bilibili-live-'))
+  try {
+    const { dedicatedSession, manager } = createFixture(sandbox)
+    const response = await manager.searchVideos({
+      query: '直播',
+      searchType: 'live',
+    })
+    expect(response).toMatchObject({
+      query: '直播',
+      totalCount: 0,
+      hasMore: false,
+      results: [],
+    })
+    expect(dedicatedSession.fetchedUrls).toEqual([])
+  } finally {
+    await rm(sandbox, { recursive: true, force: true })
+  }
+})
+
+test('film category uses only the official media film stream', async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), 'aurora-bilibili-film-'))
+  try {
+    const { dedicatedSession, manager } = createFixture(sandbox)
+    dedicatedSession.fetchHandler = async (url) => {
+      if (url === 'https://api.bilibili.com/x/web-interface/nav') {
+        return new Response(JSON.stringify({
+          code: 0,
+          data: {
+            wbi_img: {
+              img_url: 'https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png',
+              sub_url: 'https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png',
+            },
+          },
+        }), { headers: { 'content-type': 'application/json' } })
+      }
+      const requestUrl = new URL(url)
+      expect(requestUrl.searchParams.get('search_type')).toBe('media_ft')
+      return new Response(JSON.stringify({
+        code: 0,
+        data: {
+          numResults: 1,
+          result: [{
+            type: 'media_ft',
+            title: '官方影视',
+            eps: [{ id: 667788 }],
+          }],
+        },
+      }), { headers: { 'content-type': 'application/json' } })
+    }
+    await expect(manager.searchVideos({
+      query: '电影',
+      searchType: 'film',
+    })).resolves.toMatchObject({
+      results: [expect.objectContaining({
+        kind: 'episode',
+        mediaId: '667788',
+        author: 'B站影视',
+      })],
+    })
+    expect(dedicatedSession.fetchedUrls.some((url) =>
+      url.includes('search_type=video'),
+    )).toBe(false)
   } finally {
     await rm(sandbox, { recursive: true, force: true })
   }

@@ -1,6 +1,9 @@
 import {
   MEDIA_VISUAL_INDEX_VERSION,
   type FrameAnnotation,
+  type FrameAnnotationSource,
+  type FrameExclusion,
+  type FrameExclusionReason,
   type MediaAsset,
   type MediaIndexTask,
   type OnlineMediaDescriptor,
@@ -27,7 +30,7 @@ import { isOnlineMediaProvider } from './onlineProviderRegistry'
  */
 import type { Project } from './projects'
 
-export const LIBRARY_SCHEMA_VERSION = 4
+export const LIBRARY_SCHEMA_VERSION = 5
 
 export type PersistedProjectCover = {
   name: string
@@ -41,6 +44,7 @@ export type PersistentLibraryState = {
   projectAssetRefs: ProjectAssetRef[]
   visualIndexes: MediaVisualIndex[]
   frameAnnotations: FrameAnnotation[]
+  frameExclusions: FrameExclusion[]
   modelAssets: ModelAsset[]
   projectTitles: Record<string, string>
   projectCovers: Record<string, PersistedProjectCover>
@@ -52,13 +56,18 @@ type SerializablePersistentLibraryState = Omit<
   | 'schemaVersion'
   | 'visualIndexes'
   | 'frameAnnotations'
+  | 'frameExclusions'
   | 'modelAssets'
   | 'projectCovers'
 > &
   Partial<
     Pick<
       PersistentLibraryState,
-      'visualIndexes' | 'frameAnnotations' | 'modelAssets' | 'projectCovers'
+      | 'visualIndexes'
+      | 'frameAnnotations'
+      | 'frameExclusions'
+      | 'modelAssets'
+      | 'projectCovers'
     >
   >
 
@@ -464,6 +473,38 @@ function parseOnlineMediaDescriptor(
     }
   }
 
+  if (provider === 'douyin') {
+    let parsedUrl: URL
+    try {
+      parsedUrl = new URL(canonicalUrl)
+    } catch {
+      return null
+    }
+    if (
+      kind !== 'video' ||
+      !/^[1-9][0-9]{18}$/.test(mediaId) ||
+      parsedUrl.protocol !== 'https:' ||
+      parsedUrl.hostname !== 'www.douyin.com' ||
+      parsedUrl.port ||
+      parsedUrl.username ||
+      parsedUrl.password ||
+      parsedUrl.pathname !== `/video/${mediaId}` ||
+      parsedUrl.search ||
+      parsedUrl.hash
+    ) {
+      return null
+    }
+    return {
+      provider,
+      kind,
+      mediaId,
+      canonicalUrl: parsedUrl.toString(),
+      author,
+      description,
+      publishedAt,
+    }
+  }
+
   const isMatchingVideo =
     kind === 'video' &&
     /^BV[0-9A-Za-z]{10}$/.test(mediaId) &&
@@ -495,7 +536,7 @@ function parseOnlineMediaDescriptor(
 
 function parseMediaAsset(
   value: unknown,
-  fromSchemaVersion: 1 | 2 | 3 | 4,
+  fromSchemaVersion: 1 | 2 | 3 | 4 | 5,
 ): MediaAsset | null {
   if (!isRecord(value)) return null
   const id = readString(value.id)
@@ -525,7 +566,7 @@ function parseMediaAsset(
   const canonicalSizeBytes = readNullableFiniteNumber(value.sizeBytes)
   const indexError = readNullableString(value.indexError)
   const online =
-    fromSchemaVersion === 4 && value.online !== undefined
+    fromSchemaVersion >= 4 && value.online !== undefined
       ? parseOnlineMediaDescriptor(value.online)
       : undefined
 
@@ -546,7 +587,7 @@ function parseMediaAsset(
     sourcePath === undefined ||
     favorite === null ||
     !isMediaIndexTask(indexTask) ||
-    (fromSchemaVersion === 4 &&
+    (fromSchemaVersion >= 4 &&
       value.online !== undefined &&
       online === null) ||
     (online !== undefined &&
@@ -720,6 +761,8 @@ function parseFrameAnnotation(
       ]
     : null
   const note = readString(value.note)
+  const tagsSource = parseFrameAnnotationSource(value.tagsSource)
+  const noteSource = parseFrameAnnotationSource(value.noteSource)
   if (
     !assetId ||
     !frameId ||
@@ -730,11 +773,87 @@ function parseFrameAnnotation(
     rating < 0 ||
     rating > 5 ||
     tags === null ||
-    note === null
+    note === null ||
+    tagsSource === null ||
+    noteSource === null
   ) {
     return null
   }
-  return { assetId, frameId, favorite, rating, tags, note }
+  return {
+    assetId,
+    frameId,
+    favorite,
+    rating,
+    tags,
+    note,
+    tagsSource,
+    noteSource,
+  }
+}
+
+function parseFrameAnnotationSource(
+  value: unknown,
+): FrameAnnotationSource | null {
+  // Schema v1-v4 did not record provenance. Those annotations were always
+  // created by a person, so migration must protect them as manual content.
+  if (value === undefined) return 'manual'
+  return value === 'manual' || value === 'ai' ? value : null
+}
+
+function isFrameExclusionReason(
+  value: unknown,
+): value is FrameExclusionReason {
+  return (
+    value === 'black' ||
+    value === 'white' ||
+    value === 'duplicate' ||
+    value === 'manual'
+  )
+}
+
+function parseFrameExclusion(
+  value: unknown,
+  assetsById: Map<string, MediaAsset>,
+  validFrameIdsByAsset: Map<string, Set<string>>,
+): FrameExclusion | null {
+  if (!isRecord(value)) return null
+  const assetId = readString(value.assetId)
+  const sourceFingerprint = readString(value.sourceFingerprint)
+  const frameId = readString(value.frameId)
+  const reason = value.reason
+  const duplicateOfFrameId = readNullableString(value.duplicateOfFrameId)
+  const createdAt = readString(value.createdAt)
+  const asset = assetId ? assetsById.get(assetId) : undefined
+  const validFrameIds = assetId
+    ? validFrameIdsByAsset.get(assetId)
+    : undefined
+
+  if (
+    !assetId ||
+    !asset ||
+    !sourceFingerprint ||
+    sourceFingerprint !== asset.sourceFingerprint ||
+    !frameId ||
+    !validFrameIds?.has(frameId) ||
+    !isFrameExclusionReason(reason) ||
+    duplicateOfFrameId === undefined ||
+    (duplicateOfFrameId !== null &&
+      (!validFrameIds.has(duplicateOfFrameId) ||
+        duplicateOfFrameId === frameId)) ||
+    (reason !== 'duplicate' && duplicateOfFrameId !== null) ||
+    !createdAt
+  ) {
+    return null
+  }
+
+  return {
+    assetId,
+    sourceFingerprint,
+    frameId,
+    reason,
+    duplicateOfFrameId,
+    createdAt,
+  }
 }
 
 function parseProjectAssetRef(value: unknown): ProjectAssetRef | null {
@@ -860,7 +979,12 @@ export function serializePersistentLibrary(
     // directory. Keep their absolute paths intact so Electron can read them
     // without resolving them against the current document URL.
     visualIndexes: state.visualIndexes ?? [],
-    frameAnnotations: state.frameAnnotations ?? [],
+    frameAnnotations: (state.frameAnnotations ?? []).map((annotation) => ({
+      ...annotation,
+      tagsSource: annotation.tagsSource ?? 'manual',
+      noteSource: annotation.noteSource ?? 'manual',
+    })),
+    frameExclusions: state.frameExclusions ?? [],
     modelAssets: state.modelAssets ?? [],
     projectTitles: state.projectTitles,
     projectCovers: parseProjectCovers(state.projectCovers ?? {}, projectIds),
@@ -880,6 +1004,7 @@ export function parsePersistentLibrary(
     (sourceSchemaVersion !== 1 &&
       sourceSchemaVersion !== 2 &&
       sourceSchemaVersion !== 3 &&
+      sourceSchemaVersion !== 4 &&
       sourceSchemaVersion !== LIBRARY_SCHEMA_VERSION) ||
     !Array.isArray(library.projects) ||
     !Array.isArray(library.mediaAssets) ||
@@ -887,11 +1012,13 @@ export function parsePersistentLibrary(
     (typeof sourceSchemaVersion === 'number' &&
       sourceSchemaVersion >= 2 &&
       (!Array.isArray(library.visualIndexes) ||
-        !Array.isArray(library.frameAnnotations)))
+        !Array.isArray(library.frameAnnotations))) ||
+    (sourceSchemaVersion === LIBRARY_SCHEMA_VERSION &&
+      !Array.isArray(library.frameExclusions))
   ) {
     return null
   }
-  const parsedSchemaVersion = sourceSchemaVersion as 1 | 2 | 3 | 4
+  const parsedSchemaVersion = sourceSchemaVersion as 1 | 2 | 3 | 4 | 5
 
   const projects = library.projects
     .map(parseProject)
@@ -1004,6 +1131,25 @@ export function parsePersistentLibrary(
             return true
           })
       : []
+  const exclusionKeys = new Set<string>()
+  const frameExclusions =
+    parsedSchemaVersion >= 5
+      ? (library.frameExclusions as unknown[])
+          .map((exclusion) =>
+            parseFrameExclusion(
+              exclusion,
+              assetsById,
+              validFrameIdsByAsset,
+            ),
+          )
+          .filter((exclusion): exclusion is FrameExclusion => {
+            if (exclusion === null) return false
+            const key = `${exclusion.assetId}\u0000${exclusion.frameId}`
+            if (exclusionKeys.has(key)) return false
+            exclusionKeys.add(key)
+            return true
+          })
+      : []
 
   if (projects.length === 0) return null
 
@@ -1025,6 +1171,7 @@ export function parsePersistentLibrary(
     projectAssetRefs,
     visualIndexes,
     frameAnnotations,
+    frameExclusions,
     modelAssets,
     projectTitles: parseProjectTitles(library.projectTitles),
     projectCovers:

@@ -15,7 +15,7 @@ export const createDefaultDiscoverySearchRepository = (
   const localProvider = new LocalDiscoverySearchProvider({ getResults: getLocalResults })
   const onlineProvider = new LocalDiscoverySearchProvider({
     id: 'aurora-online-library',
-    sources: ['bilibili', 'tencent', 'xinpianchang', 'youku'],
+    sources: ['bilibili', 'tencent', 'xinpianchang', 'youku', 'douyin'],
     getResults: getLocalResults,
   })
   const embyProvider = new EmbyDiscoverySearchProvider(

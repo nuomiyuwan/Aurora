@@ -183,11 +183,15 @@ test('keeps the same embedded player mounted when its reflection source appears'
     .toBe(1)
   await expect(
     page.locator(
-      '.frameRingPreviewOnlineReflectionSource',
+      '.frameRingPreviewOnlineReflectionSource[data-online-reflection-source="poster"]',
     ),
-  ).toHaveCount(0)
+  ).toHaveCount(1)
   const reflectionCanvas = page.locator('.frameRingReflectionCanvas')
-  await expect(reflectionCanvas).toHaveCount(0)
+  await expect(reflectionCanvas).toHaveCount(1)
+  await expect(reflectionCanvas).toHaveAttribute(
+    'data-reflection-content-ready',
+    'true',
+  )
   await page.evaluate(() => {
     (
       window as typeof window & {
@@ -213,9 +217,11 @@ test('keeps the same embedded player mounted when its reflection source appears'
     )
     .toBe(2)
   await expect(
-    page.locator('.frameRingPreviewOnlineReflectionSource'),
-  ).toHaveCount(0)
-  await expect(reflectionCanvas).toHaveCount(0)
+    page.locator(
+      '.frameRingPreviewOnlineReflectionSource[data-online-reflection-source="poster"]',
+    ),
+  ).toHaveCount(1)
+  await expect(reflectionCanvas).toHaveCount(1)
 
   await page.evaluate(() => {
     (
@@ -276,10 +282,10 @@ test('keeps the same embedded player mounted when its reflection source appears'
   await expect(onlineActions).toBeVisible()
   await expect(onlineActions.getByRole('button')).toHaveCount(2)
   await onlineActions
-    .getByRole('button', { name: '收藏在线视频' })
+    .getByRole('button', { name: '收藏到 Aurora' })
     .click()
   await expect(
-    onlineActions.getByRole('button', { name: '取消收藏在线视频' }),
+    onlineActions.getByRole('button', { name: '取消 Aurora 收藏' }),
   ).toHaveAttribute('aria-pressed', 'true')
   await onlineActions
     .getByRole('button', { name: '将在线视频加入项目' })

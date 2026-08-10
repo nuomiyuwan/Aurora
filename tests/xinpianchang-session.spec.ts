@@ -12,6 +12,7 @@ const {
   XINPIANCHANG_PARTITION,
   XINPIANCHANG_SEARCH_UNAVAILABLE_CODE,
   XinpianchangSearchUnavailableError,
+  captureXinpianchangEmbeddedFrame,
   createXinpianchangArticleUrl,
   createXinpianchangManagedCoverInput,
   createXinpianchangPlaybackTarget,
@@ -34,6 +35,10 @@ const {
     reason: string
     retryable: boolean
   }
+  captureXinpianchangEmbeddedFrame(
+    hostContents: EventEmitter,
+    request: { kind: 'video'; mediaId: string },
+  ): Promise<string | null>
   createXinpianchangArticleUrl(articleId: string | number): string
   createXinpianchangManagedCoverInput(value: Record<string, unknown>): {
     provider: string
@@ -178,6 +183,10 @@ class FakeXinpianchangGuest extends EventEmitter {
   currentUrl: string
   destroyed = false
   loadedUrls: string[] = []
+  executedScripts: string[] = []
+  frameReady = true
+  capturedImage: unknown = null
+  capturePageCount = 0
   openHandler: null | (() => { action: string }) = null
   session: FakeXinpianchangSession
 
@@ -193,6 +202,14 @@ class FakeXinpianchangGuest extends EventEmitter {
   async loadURL(url: string) {
     this.currentUrl = url
     this.loadedUrls.push(url)
+  }
+  executeJavaScript(script: string) {
+    this.executedScripts.push(script)
+    return Promise.resolve(this.frameReady)
+  }
+  capturePage() {
+    this.capturePageCount += 1
+    return Promise.resolve(this.capturedImage)
   }
   setWindowOpenHandler(handler: () => { action: string }) {
     this.openHandler = handler
@@ -733,6 +750,35 @@ test('webview guard owns only its partition and locks the stable article identit
     dedicatedSession,
   )
   host.emit('did-attach-webview', {}, guest)
+
+  const capturedDataUrl = 'data:image/png;base64,aGVsbG8='
+  const resizeOptions: Array<Record<string, unknown>> = []
+  const resizedImage = {
+    isEmpty: () => false,
+    getSize: () => ({ width: 480, height: 270 }),
+    toDataURL: () => capturedDataUrl,
+  }
+  guest.capturedImage = {
+    isEmpty: () => false,
+    getSize: () => ({ width: 1_280, height: 720 }),
+    resize: (options: Record<string, unknown>) => {
+      resizeOptions.push(options)
+      return resizedImage
+    },
+  }
+  await expect(captureXinpianchangEmbeddedFrame(host, {
+    kind: 'video',
+    mediaId: '13772048',
+  })).resolves.toBe(capturedDataUrl)
+  expect(guest.executedScripts.at(-1)).toContain(
+    "document.querySelectorAll('video')",
+  )
+  expect(guest.capturePageCount).toBe(1)
+  expect(resizeOptions).toEqual([{ width: 480, quality: 'good' }])
+  await expect(captureXinpianchangEmbeddedFrame(host, {
+    kind: 'video',
+    mediaId: '13772049',
+  })).resolves.toBeNull()
   let allowedRedirectPrevented = false
   guest.emit(
     'will-redirect',
@@ -754,6 +800,97 @@ test('webview guard owns only its partition and locks the stable article identit
   expect(guest.loadedUrls).toEqual([
     'https://www.xinpianchang.com/iframe/a13772048',
   ])
+  dispose()
+  await expect(captureXinpianchangEmbeddedFrame(host, {
+    kind: 'video',
+    mediaId: '13772048',
+  })).resolves.toBeNull()
+})
+
+test('webview guard captures with Electron-like sessions that expose no partition getter', async () => {
+  const host = new EventEmitter()
+  const electronLikeSession = new EventEmitter()
+  const dispose = installXinpianchangPlayerWebviewGuard(
+    host,
+    electronLikeSession,
+  )
+  host.emit(
+    'will-attach-webview',
+    { preventDefault: () => undefined },
+    {
+      partition: XINPIANCHANG_PARTITION,
+      session: electronLikeSession,
+    },
+    {
+      partition: XINPIANCHANG_PARTITION,
+      src: 'https://www.xinpianchang.com/iframe/a13772048',
+    },
+  )
+  const guest = new FakeXinpianchangGuest(
+    'https://www.xinpianchang.com/iframe/a13772048',
+    electronLikeSession as FakeXinpianchangSession,
+  )
+  guest.capturedImage = {
+    isEmpty: () => false,
+    getSize: () => ({ width: 480, height: 270 }),
+    toDataURL: () => 'data:image/png;base64,aGVsbG8=',
+  }
+  host.emit('did-attach-webview', {}, guest)
+
+  await expect(captureXinpianchangEmbeddedFrame(host, {
+    kind: 'video',
+    mediaId: '13772048',
+  })).resolves.toBe('data:image/png;base64,aGVsbG8=')
+  expect(guest.capturePageCount).toBe(1)
+  dispose()
+})
+
+test('embedded frame capture fails closed without a current real video surface', async () => {
+  const host = new EventEmitter()
+  const dedicatedSession = new FakeXinpianchangSession()
+  const dispose = installXinpianchangPlayerWebviewGuard(host, dedicatedSession)
+  host.emit(
+    'will-attach-webview',
+    { preventDefault: () => undefined },
+    { partition: XINPIANCHANG_PARTITION, session: dedicatedSession },
+    {
+      partition: XINPIANCHANG_PARTITION,
+      src: 'https://www.xinpianchang.com/iframe/a13772048',
+    },
+  )
+  const guest = new FakeXinpianchangGuest(
+    'https://www.xinpianchang.com/iframe/a13772048',
+    dedicatedSession,
+  )
+  host.emit('did-attach-webview', {}, guest)
+  guest.capturedImage = {
+    isEmpty: () => false,
+    getSize: () => ({ width: 480, height: 270 }),
+    toDataURL: () => 'data:image/png;base64,aGVsbG8=',
+  }
+
+  guest.frameReady = false
+  await expect(captureXinpianchangEmbeddedFrame(host, {
+    kind: 'video',
+    mediaId: '13772048',
+  })).resolves.toBeNull()
+  expect(guest.capturePageCount).toBe(0)
+
+  guest.frameReady = true
+  guest.currentUrl = 'https://player.xinpianchang.com/?aid=13772049&mid=other'
+  await expect(captureXinpianchangEmbeddedFrame(host, {
+    kind: 'video',
+    mediaId: '13772048',
+  })).resolves.toBeNull()
+  expect(guest.capturePageCount).toBe(0)
+
+  guest.currentUrl = 'https://www.xinpianchang.com/iframe/a13772048'
+  guest.destroyed = true
+  await expect(captureXinpianchangEmbeddedFrame(host, {
+    kind: 'video',
+    mediaId: '13772048',
+  })).resolves.toBeNull()
+  expect(guest.capturePageCount).toBe(0)
   dispose()
 })
 
