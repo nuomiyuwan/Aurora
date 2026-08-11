@@ -58,6 +58,17 @@
   visibility: visible;
 }
 
+.discoveryView[data-result-pointer-drag-enabled='true']
+  .discoveryResultHit {
+  cursor: grab;
+}
+
+.discoveryView.isResultPointerDragging,
+.discoveryView.isResultPointerDragging .discoveryResultHit {
+  cursor: grabbing;
+  user-select: none;
+}
+
 .discoveryReflectionCanvas {
   position: absolute;
   z-index: 8;
@@ -481,7 +492,22 @@
 }
 
 .discoverySearchHint svg {
+  flex: 0 0 auto;
   color: var(--discovery-ui-accent-muted);
+}
+
+.discoverySearchHint.isCompact {
+  max-width: 340px;
+}
+
+.discoverySearchHintText {
+  min-width: 0;
+}
+
+.discoverySearchHint.isCompact .discoverySearchHintText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .discoverySearchCluster[data-search-position='center'] .discoveryFilterRow,

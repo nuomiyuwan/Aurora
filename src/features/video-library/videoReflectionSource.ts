@@ -1,3 +1,5 @@
+import type { MediaColorPresetId } from '../../data/mediaColorPresets'
+
 export const VIDEO_DETAIL_REFLECTION_ID = 'video-detail-panel'
 
 export interface ClipReflectionSource {
@@ -17,4 +19,5 @@ export interface ClipReflectionSource {
   annotated: boolean
   note: string
   favorite?: boolean
+  colorPreset?: MediaColorPresetId
 }

@@ -41,6 +41,7 @@ import type {
 } from 'react'
 import type { Project } from '../../data/projects'
 import type { MediaIndexTask } from '../../data/mediaLibraryTypes'
+import { getMediaColorPreset } from '../../data/mediaColorPresets'
 import {
   readWheelDragSample,
   resolveTrackpadSnapTarget,
@@ -56,7 +57,9 @@ import {
 import type { FrameRingEntryIntent } from './frameRingEntryIntent'
 import {
   clampLocalPlayerTime,
+  clampLocalPlayerVolume,
   LOCAL_PLAYER_KEYBOARD_SEEK_SECONDS,
+  LOCAL_PLAYER_KEYBOARD_VOLUME_STEP,
   resolveLocalPlayerTrackpadSeekDelta,
 } from './frameRingPlayerInput'
 import { getFrameRingVideoCrossOrigin } from './frameRingLiveReflection'
@@ -412,9 +415,13 @@ export function FrameRingView({
     [clip, relatedThumbnails],
   )
   const hasFrameRing = frames.length > 0
+  const mediaColorFilter = getMediaColorPreset(clip.colorPreset).cssFilter
   const frameRingCssVariables = useMemo(
-    () => getFrameRingCssVariables(layout, { hasFrameRing }) as CSSProperties,
-    [hasFrameRing, layout],
+    () => ({
+      ...getFrameRingCssVariables(layout, { hasFrameRing }),
+      '--media-color-filter': mediaColorFilter,
+    }) as CSSProperties,
+    [hasFrameRing, layout, mediaColorFilter],
   )
   const getRequestedFrameIndex = useCallback(() => {
     if (frames.length === 0) return 0
@@ -1057,6 +1064,19 @@ export function FrameRingView({
     seekPlayer(currentTime + deltaSeconds, false)
   }, [playerTimeSeconds, seekPlayer])
 
+  const updatePlayerVolume = useCallback((nextVolume: number) => {
+    const normalizedVolume = clampLocalPlayerVolume(nextVolume)
+    setPlayerVolume(normalizedVolume)
+    setPlayerMuted(normalizedVolume <= 0)
+    if (normalizedVolume > 0) {
+      lastAudiblePlayerVolumeRef.current = normalizedVolume
+    }
+    const video = previewVideoRef.current
+    if (!video) return
+    video.volume = normalizedVolume
+    video.muted = normalizedVolume <= 0
+  }, [])
+
   const settleTo = useCallback(
     (nextIndex: number, duration = FRAME_SETTLE_DURATION) => {
       if (settleRaf.current !== undefined) {
@@ -1433,6 +1453,18 @@ export function FrameRingView({
           settleTo(targetIndex + 1)
         }
       }
+      if (
+        hasPlayableVideo &&
+        (event.key === 'ArrowUp' || event.key === 'ArrowDown')
+      ) {
+        event.preventDefault()
+        updatePlayerVolume(
+          effectivePlayerVolume +
+            (event.key === 'ArrowUp'
+              ? LOCAL_PLAYER_KEYBOARD_VOLUME_STEP
+              : -LOCAL_PLAYER_KEYBOARD_VOLUME_STEP),
+        )
+      }
       if (event.key === ' ') {
         event.preventDefault()
         togglePlayerPlayback()
@@ -1442,6 +1474,7 @@ export function FrameRingView({
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [
     hasPlayableVideo,
+    effectivePlayerVolume,
     interactive,
     onlinePlaybackMode,
     seekPlayerBy,
@@ -1451,6 +1484,7 @@ export function FrameRingView({
     targetIndex,
     togglePlayerPlayback,
     trimMode,
+    updatePlayerVolume,
   ])
 
   useEffect(() => {
@@ -1874,19 +1908,6 @@ export function FrameRingView({
       tags: activeAnnotation.tags.filter((item) => item !== tag),
     })
     setActionStatus('')
-  }
-
-  function updatePlayerVolume(nextVolume: number) {
-    const normalizedVolume = Math.min(1, Math.max(0, nextVolume))
-    setPlayerVolume(normalizedVolume)
-    setPlayerMuted(normalizedVolume <= 0)
-    if (normalizedVolume > 0) {
-      lastAudiblePlayerVolumeRef.current = normalizedVolume
-    }
-    const video = previewVideoRef.current
-    if (!video) return
-    video.volume = normalizedVolume
-    video.muted = normalizedVolume <= 0
   }
 
   function togglePlayerMute() {
@@ -3554,6 +3575,7 @@ export function FrameRingView({
         aria-modal="true"
         aria-labelledby="frame-ring-smart-organize-title"
         data-camera-gesture="block"
+        style={frameRingCssVariables}
         onPointerDown={(event) => {
           event.stopPropagation()
           if (event.target === event.currentTarget) closeSmartOrganizeDialog()
@@ -4078,7 +4100,7 @@ export function FrameRingView({
                   alt=""
                   style={{
                     objectPosition: `${playerFrame.cropX}% ${playerFrame.cropY}%`,
-                    filter: `brightness(${playerFrame.brightness})`,
+                    filter: `${mediaColorFilter} brightness(${playerFrame.brightness})`,
                   }}
                 />
               )}

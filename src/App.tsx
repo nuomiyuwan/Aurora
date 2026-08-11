@@ -28,6 +28,7 @@ import {
   RefreshCw,
   Search,
   Settings,
+  Sparkles,
   Star,
   Trash2,
   Video,
@@ -57,6 +58,12 @@ import {
   parsePersistentLibrary,
   serializePersistentLibrary,
 } from './data/libraryPersistence'
+import {
+  getMediaColorPreset,
+  getNextMediaColorPresetId,
+  normalizeMediaColorPresetId,
+  type MediaColorPresetId,
+} from './data/mediaColorPresets'
 import type {
   FrameAnnotation as StoredFrameAnnotation,
   FrameExclusion,
@@ -160,8 +167,9 @@ import {
 } from './features/video-library/VideoLibraryReflectionCanvas'
 import {
   resolveVideoClipHoverFrameIndex,
+  resolveVideoClipHoverPlaybackSource,
   resolveVideoClipHoverProgress,
-  resolveVideoClipHoverTime,
+  resolveVideoClipHoverSeekTime,
   shouldHandleVideoClipHoverPointer,
 } from './features/video-library/videoClipHoverScrub'
 import {
@@ -229,6 +237,13 @@ import {
   isClipFilterStateActive,
   type ClipFilterState,
 } from './features/video-library/clipFiltering'
+import {
+  createClipAiMetadataSuggestion,
+  createImportedClipAiMetadataPatch,
+  mergeClipAiTags,
+  selectClipAiRepresentativeFrames,
+  type ClipAiMetadataSuggestion,
+} from './features/video-library/clipAiMetadata'
 import {
   formatProjectStorageSummary,
   summarizeProjectStorage,
@@ -419,6 +434,7 @@ type VideoClip = {
   tags: string[]
   annotated: boolean
   note: string
+  colorPreset: MediaColorPresetId
   online?: OnlineMediaDescriptor
 }
 
@@ -427,6 +443,7 @@ type ClipHoverScrubVideoPortal = {
   sourceUrl: string
   poster: string
   target: HTMLElement
+  lightweight: boolean
 }
 
 type ClipHoverScrubSession = {
@@ -464,6 +481,13 @@ type PreviewPlaybackState = {
   sourcePath: string
   playbackPath: string | null
   usesPreviewProxy: boolean
+  error: string | null
+}
+
+type LightweightPreviewState = {
+  status: 'preparing' | 'ready' | 'failed'
+  sourcePath: string
+  playbackPath: string | null
   error: string | null
 }
 
@@ -612,6 +636,46 @@ type ClipActionNotice = {
   projectId?: string
 }
 
+type ClipAiMetadataDialogState = {
+  clipId: string
+  filename: string
+  status: 'analyzing' | 'ready' | 'error'
+  tags: string[]
+  selectedTags: string[]
+  note: string
+  applyNote: boolean
+  evidenceCount: number
+  evidenceTier: 'thumbnail' | 'visual-index' | null
+  newlyAnalyzedFrameCount: number
+  error: string | null
+}
+
+type ClipAiMetadataTarget = {
+  clipId: string
+  assetId: string
+  projectId: string
+  filename: string
+  sourceFingerprint: string
+  evidenceRevision: string
+  evidenceTier: 'thumbnail' | 'visual-index'
+  candidates: AiVisualFrameCandidate[]
+}
+
+type ClipAiMetadataAnalysisResult = {
+  target: ClipAiMetadataTarget
+  suggestion: ClipAiMetadataSuggestion
+  evidenceCount: number
+  newlyAnalyzedFrameCount: number
+}
+
+type ImportedClipAiMetadataRequest = {
+  referenceId: string
+  placeholder: {
+    tag: string
+    note: string
+  }
+}
+
 type ProjectImportProgress = {
   projectId: string
   projectTitle: string
@@ -642,6 +706,10 @@ const CLIP_TRACK_MAX_FLING_COLUMNS = 4
 const CLIP_DETAIL_TAG_MAX_COUNT = 6
 const CLIP_DETAIL_TAG_MAX_LENGTH = 12
 const CLIP_DETAIL_NOTE_MAX_LENGTH = 40
+const CLIP_AI_REPRESENTATIVE_FRAME_LIMIT = 8
+const IMPORTED_CLIP_DEFAULT_TAG = '新导入'
+const IMPORTED_CLIP_DEFAULT_NOTE = '刚导入 Aurora，等待后续建立视觉索引。'
+const EXTERNAL_CLIP_DEFAULT_NOTE = '从系统打开的外部视频，尚未加入 Aurora。'
 const STARTUP_MODEL_THUMBNAIL_PRELOAD_LIMIT = 48
 const EMPTY_PROJECT_COVER = ''
 const LEGACY_EMPTY_PROJECT_COVER = './aurora/Project-Details-Background.png'
@@ -985,12 +1053,9 @@ function createOnlineVideoClip(
     tags: reference?.tags ?? [],
     annotated: reference?.annotated ?? false,
     note: reference?.note ?? asset.online.description,
+    colorPreset: 'original',
     online: asset.online,
   }
-}
-
-function getDetailPreviewPlaybackKey(clip: VideoClip) {
-  return `${clip.id}\u0000${clip.sourceUrl ?? ''}`
 }
 
 function isSupportedVideoFile(file: File) {
@@ -1049,9 +1114,9 @@ function createImportedProjectMedia(
       assetId,
       order: project.videoCount + sequence,
       thumbnailFollowsProject: true,
-      tags: ['新导入'],
+      tags: [IMPORTED_CLIP_DEFAULT_TAG],
       annotated: false,
-      note: '刚导入 Aurora，等待后续建立视觉索引。',
+      note: IMPORTED_CLIP_DEFAULT_NOTE,
     },
   }
 }
@@ -1533,6 +1598,9 @@ function App() {
   const [previewPlaybackByAsset, setPreviewPlaybackByAsset] = useState<
     Record<string, PreviewPlaybackState>
   >({})
+  const [lightweightPreviewByAsset, setLightweightPreviewByAsset] = useState<
+    Record<string, LightweightPreviewState>
+  >({})
   const [clipMenuId, setClipMenuId] = useState<string | null>(null)
   const [clipAddDialogId, setClipAddDialogId] = useState<string | null>(null)
   const [externalVideoQueue, setExternalVideoQueue] = useState<
@@ -1593,6 +1661,8 @@ function App() {
   const [clipTagEditorStatus, setClipTagEditorStatus] = useState('')
   const [clipNoteEditorId, setClipNoteEditorId] = useState<string | null>(null)
   const [clipNoteDraft, setClipNoteDraft] = useState('')
+  const [clipAiMetadataDialog, setClipAiMetadataDialog] =
+    useState<ClipAiMetadataDialogState | null>(null)
   const [detailPreviewPlayingKey, setDetailPreviewPlayingKey] =
     useState<string | null>(null)
   const [detailPreviewFailedSource, setDetailPreviewFailedSource] =
@@ -1737,8 +1807,12 @@ function App() {
   const projectImportProgressTimerRef = useRef<number | undefined>(undefined)
   const importedMediaFilesRef = useRef(new Map<string, File>())
   const previewRequestsRef = useRef(new Map<string, Promise<boolean>>())
+  const lightweightPreviewRequestsRef = useRef(
+    new Map<string, Promise<boolean>>(),
+  )
   const clipActionNoticeTimerRef = useRef<number | undefined>(undefined)
   const detailPreviewVideoRef = useRef<HTMLVideoElement>(null)
+  const detailColorPresetClickTimerRef = useRef<number | undefined>(undefined)
   const openFrameRingRef = useRef<(clipId: string) => void>(() => undefined)
   const backgroundObjectUrlsRef = useRef(new Set<string>())
   const particleObjectUrlsRef = useRef(new Set<string>())
@@ -1780,6 +1854,11 @@ function App() {
   const visualIndexesRef = useRef(visualIndexes)
   const frameAnnotationsRef = useRef(frameAnnotations)
   const frameExclusionsRef = useRef(frameExclusions)
+  const aiServiceProfilesStateRef = useRef(aiServiceProfilesState)
+  const clipAiMetadataRequestVersionRef = useRef(0)
+  const importedClipAiMetadataQueueRef = useRef<Promise<void>>(
+    Promise.resolve(),
+  )
   projectsRef.current = projects
   mediaAssetsRef.current = mediaAssets
   modelAssetsRef.current = modelAssets
@@ -1787,6 +1866,7 @@ function App() {
   visualIndexesRef.current = visualIndexes
   frameAnnotationsRef.current = frameAnnotations
   frameExclusionsRef.current = frameExclusions
+  aiServiceProfilesStateRef.current = aiServiceProfilesState
   onlineSearchAssetsByProviderRef.current = onlineSearchAssetsByProvider
   onlineProviderEnabledRef.current = onlineProviderEnabled
 
@@ -2550,6 +2630,97 @@ function App() {
     })
   }, [])
 
+  const ensureLightweightPreview = useCallback(async (
+    clip: VideoClip,
+    rebuild = false,
+  ) => {
+    const bridge = window.desktopBridge
+    if (clip.online || !clip.sourcePath || !bridge?.ensureMediaPreview) {
+      return false
+    }
+
+    const currentPreview = lightweightPreviewByAsset[clip.assetId]
+    if (
+      !rebuild &&
+      currentPreview?.sourcePath === clip.sourcePath
+    ) {
+      if (currentPreview.status === 'ready') return true
+      if (currentPreview.status === 'failed') return false
+    }
+
+    const requestKey = `${clip.assetId}\u0000${clip.sourcePath}`
+    const runningRequest = lightweightPreviewRequestsRef.current.get(requestKey)
+    if (runningRequest) return runningRequest
+
+    const operationId = bridge.createMediaOperationId()
+    setLightweightPreviewByAsset((current) => ({
+      ...current,
+      [clip.assetId]: {
+        status: 'preparing',
+        sourcePath: clip.sourcePath!,
+        playbackPath:
+          current[clip.assetId]?.sourcePath === clip.sourcePath
+            ? current[clip.assetId].playbackPath
+            : null,
+        error: null,
+      },
+    }))
+
+    const request = (async () => {
+      try {
+        const result = await bridge.ensureMediaPreview({
+          assetId: clip.assetId,
+          sourcePath: clip.sourcePath!,
+          profile: 'lightweight',
+          forceProxy: true,
+          rebuild,
+          operationId,
+        })
+        if (!result.usesPreviewProxy || !result.playbackPath) {
+          throw new Error('未生成轻量视频预览')
+        }
+        const resolvedSourcePath = result.metadata?.filePath ?? clip.sourcePath!
+        if (result.metadata) {
+          setMediaAssets((current) =>
+            current.map((asset) =>
+              asset.id === clip.assetId
+                ? applyMediaFileMetadata(asset, result.metadata)
+                : asset,
+            ),
+          )
+        }
+        setLightweightPreviewByAsset((current) => ({
+          ...current,
+          [clip.assetId]: {
+            status: 'ready',
+            sourcePath: resolvedSourcePath,
+            playbackPath: result.playbackPath,
+            error: null,
+          },
+        }))
+        return true
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : '轻量视频预览准备失败'
+        setLightweightPreviewByAsset((current) => ({
+          ...current,
+          [clip.assetId]: {
+            status: 'failed',
+            sourcePath: clip.sourcePath!,
+            playbackPath: null,
+            error: message,
+          },
+        }))
+        return false
+      } finally {
+        lightweightPreviewRequestsRef.current.delete(requestKey)
+      }
+    })()
+
+    lightweightPreviewRequestsRef.current.set(requestKey, request)
+    return request
+  }, [lightweightPreviewByAsset])
+
   useEffect(() => {
     const bridge = window.desktopBridge
     if (
@@ -2730,6 +2901,10 @@ function App() {
   const clipHoverScrubRafRef = useRef<number | undefined>(undefined)
   const clipHoverScrubVideoRef = useRef<HTMLVideoElement>(null)
   const loadedClipHoverFramesRef = useRef(new Set<string>())
+  const clipHoverPreviewPrepareRef = useRef<{
+    clipId: string
+    timer: number
+  } | null>(null)
   const clipGlassLayerRef = useRef<HTMLDivElement>(null)
   const modelGlassLayerRef = useRef<HTMLDivElement>(null)
   const videoLibraryToolbarRef = useRef<HTMLDivElement>(null)
@@ -2758,6 +2933,8 @@ function App() {
     velocityX: 0,
   })
   const projectWheelReleaseTimer = useRef<number | undefined>(undefined)
+  const projectWheelStepReleaseTimer = useRef<number | undefined>(undefined)
+  const projectWheelStepGestureActiveRef = useRef(false)
   const clipWheelReleaseTimer = useRef<number | undefined>(undefined)
   const projectWheelPreviewRaf = useRef<number | undefined>(undefined)
   const clipWheelPreviewRaf = useRef<number | undefined>(undefined)
@@ -2967,6 +3144,7 @@ function App() {
           tags: reference.tags,
           annotated: reference.annotated,
           note: reference.note,
+          colorPreset: normalizeMediaColorPresetId(asset.colorPreset),
           online: asset.online,
         } satisfies VideoClip,
       ]
@@ -3542,32 +3720,61 @@ function App() {
       },
     )
   }, [activeIndex, displayProjects])
-  const detailPreviewPlaybackKey = detailClip
-    ? getDetailPreviewPlaybackKey(detailClip)
-    : null
-  const detailPreviewState = detailClip
-    ? previewPlaybackByAsset[detailClip.assetId]
+  const detailColorPreset = getMediaColorPreset(detailClip?.colorPreset)
+  const storedDetailLightweightPreview = detailClip
+    ? lightweightPreviewByAsset[detailClip.assetId]
     : undefined
-  const detailCompatibilityPreviewRequired = Boolean(
+  const detailLightweightPreview =
     detailClip &&
-      detailClip.sampleCount <= 0 &&
-      requiresKnownVideoPreviewProxy(detailClip.codec) &&
-      !(
-        detailPreviewState?.sourcePath === detailClip.sourcePath &&
-        detailPreviewState.status === 'ready' &&
-        detailPreviewState.usesPreviewProxy
-      ),
-  )
+    storedDetailLightweightPreview?.sourcePath === detailClip.sourcePath
+      ? storedDetailLightweightPreview
+      : undefined
+  const detailPreviewSourceUrl =
+    detailClip && detailLightweightPreview?.status === 'ready'
+      ? resolveLibraryMediaUrl(detailLightweightPreview.playbackPath)
+      : null
+  const detailPreviewPlaybackKey = detailClip
+    ? `${detailClip.id}\u0000${detailPreviewSourceUrl ?? ''}`
+    : null
   const detailIndexProgress = detailClip
     ? indexProgressByAsset[detailClip.assetId]
     : undefined
+
+  useEffect(() => {
+    if (
+      currentView !== 'video-library' ||
+      !detailClip ||
+      detailClip.online ||
+      !detailClip.sourcePath ||
+      detailLightweightPreview?.status === 'preparing' ||
+      detailLightweightPreview?.status === 'ready' ||
+      detailLightweightPreview?.status === 'failed'
+    ) {
+      return
+    }
+    void ensureLightweightPreview(detailClip)
+  }, [
+    currentView,
+    detailClip,
+    detailLightweightPreview?.status,
+    ensureLightweightPreview,
+  ])
 
   useEffect(() => {
     const video = detailPreviewVideoRef.current
     return () => {
       video?.pause()
     }
-  }, [currentView, detailClip?.id, detailClip?.sourceUrl])
+  }, [currentView, detailClip?.id, detailPreviewSourceUrl])
+  useEffect(
+    () => () => {
+      if (detailColorPresetClickTimerRef.current !== undefined) {
+        window.clearTimeout(detailColorPresetClickTimerRef.current)
+        detailColorPresetClickTimerRef.current = undefined
+      }
+    },
+    [detailClip?.id],
+  )
   const frameRingAnnotations = useMemo<Record<string, FrameRingAnnotation>>(
     () =>
       Object.fromEntries(
@@ -3604,6 +3811,8 @@ function App() {
     videoClips.find((clip) => clip.id === clipTagEditorId) ?? null
   const clipNoteEditor =
     videoClips.find((clip) => clip.id === clipNoteEditorId) ?? null
+  const clipAiMetadataDialogClip =
+    videoClips.find((clip) => clip.id === clipAiMetadataDialog?.clipId) ?? null
   const clipMembershipProjectIds = useMemo(
     () =>
       new Set(
@@ -4450,6 +4659,15 @@ function App() {
   }
 
   function clearClipHoverScrub(expectedClipId?: string) {
+    const previewPreparation = clipHoverPreviewPrepareRef.current
+    if (
+      previewPreparation &&
+      (!expectedClipId || previewPreparation.clipId === expectedClipId)
+    ) {
+      window.clearTimeout(previewPreparation.timer)
+      clipHoverPreviewPrepareRef.current = null
+    }
+
     const pending = pendingClipHoverScrubRef.current
     if (!expectedClipId || pending?.clip.id === expectedClipId) {
       pendingClipHoverScrubRef.current = null
@@ -4476,6 +4694,46 @@ function App() {
     setClipHoverScrubVideoPortal((current) =>
       current?.clipId === session.clipId ? null : current,
     )
+  }
+
+  function resolveReadyLightweightPreviewUrl(clip: VideoClip) {
+    const preview = lightweightPreviewByAsset[clip.assetId]
+    if (
+      preview?.status !== 'ready' ||
+      preview.sourcePath !== clip.sourcePath ||
+      !preview.playbackPath
+    ) {
+      return null
+    }
+    return resolveLibraryMediaUrl(preview.playbackPath)
+  }
+
+  function scheduleLightweightHoverPreview(clip: VideoClip) {
+    if (clip.online || !clip.sourcePath || clip.indexedFrames.length > 1) return
+    const preview = lightweightPreviewByAsset[clip.assetId]
+    if (
+      preview?.sourcePath === clip.sourcePath &&
+      (preview.status === 'preparing' ||
+        preview.status === 'ready' ||
+        preview.status === 'failed')
+    ) {
+      return
+    }
+
+    const scheduled = clipHoverPreviewPrepareRef.current
+    if (scheduled?.clipId === clip.id) return
+    if (scheduled) window.clearTimeout(scheduled.timer)
+    const timer = window.setTimeout(() => {
+      if (clipHoverPreviewPrepareRef.current?.clipId !== clip.id) return
+      clipHoverPreviewPrepareRef.current = null
+      const activeClipId =
+        clipHoverScrubSessionRef.current?.clipId ??
+        pendingClipHoverScrubRef.current?.clip.id
+      if (activeClipId === clip.id) {
+        void ensureLightweightPreview(clip)
+      }
+    }, 180)
+    clipHoverPreviewPrepareRef.current = { clipId: clip.id, timer }
   }
 
   function findClipHoverScrubImage(clipId: string) {
@@ -4550,17 +4808,20 @@ function App() {
       return
     }
     if (video.dataset.clipId !== session.clipId) return
+    if (video.seeking) return
 
     const duration =
       Number.isFinite(video.duration) && video.duration > 0
         ? video.duration
         : null
     if (duration === null) return
-    const rawTarget = resolveVideoClipHoverTime(session.progress, duration)
-    if (rawTarget === null) return
-    const endGuard = Math.min(0.04, duration * 0.02)
-    const targetTime = Math.min(rawTarget, Math.max(0, duration - endGuard))
-    if (Math.abs(video.currentTime - targetTime) < 0.04) return
+    const seekStep = 1 / 12
+    const targetTime = resolveVideoClipHoverSeekTime(
+      session.progress,
+      duration,
+    )
+    if (targetTime === null) return
+    if (Math.abs(video.currentTime - targetTime) < seekStep * 0.75) return
     try {
       video.currentTime = targetTime
     } catch {
@@ -4590,7 +4851,15 @@ function App() {
     }
 
     const useIndexedFrames = pending.clip.indexedFrames.length > 1
-    const useVideoFallback = Boolean(pending.clip.sourceUrl)
+    const lightweightSourceUrl = resolveReadyLightweightPreviewUrl(pending.clip)
+    // Keep the original source interactive while the one-time lightweight
+    // proxy is warming. Once the proxy is ready, the next pointer sample
+    // switches over without making first hover look broken.
+    const hoverSourceUrl = resolveVideoClipHoverPlaybackSource(
+      lightweightSourceUrl,
+      pending.clip.sourceUrl,
+    )
+    const useVideoFallback = Boolean(hoverSourceUrl)
     if (!useIndexedFrames && !useVideoFallback) {
       clearClipHoverScrub(pending.clip.id)
       return
@@ -4603,7 +4872,7 @@ function App() {
       session.clipId !== pending.clip.id ||
       session.mode !== nextMode ||
       session.image !== image ||
-      (nextMode === 'video' && session.sourceUrl !== pending.clip.sourceUrl)
+      (nextMode === 'video' && session.sourceUrl !== hoverSourceUrl)
     ) {
       clearClipHoverScrub()
       session = {
@@ -4612,19 +4881,20 @@ function App() {
         image,
         hitTarget: pending.hitTarget,
         progress,
-        sourceUrl: pending.clip.sourceUrl,
+        sourceUrl: hoverSourceUrl,
         lastFrameIndex: -1,
         frameLoadVersion: 0,
       }
       clipHoverScrubSessionRef.current = session
       image.dataset.hoverScrubbing = nextMode
       pending.hitTarget.dataset.hoverScrubbing = nextMode
-      if (nextMode === 'video' && pending.clip.sourceUrl) {
+      if (nextMode === 'video' && hoverSourceUrl) {
         setClipHoverScrubVideoPortal({
           clipId: pending.clip.id,
-          sourceUrl: pending.clip.sourceUrl,
+          sourceUrl: hoverSourceUrl,
           poster: pending.clip.thumbnail,
           target: image,
+          lightweight: Boolean(lightweightSourceUrl),
         })
       }
     }
@@ -4656,6 +4926,8 @@ function App() {
       clearClipHoverScrub(clip.id)
       return
     }
+
+    scheduleLightweightHoverPreview(clip)
 
     pendingClipHoverScrubRef.current = {
       clip,
@@ -4961,6 +5233,11 @@ function App() {
       window.clearTimeout(projectWheelReleaseTimer.current)
       projectWheelReleaseTimer.current = undefined
     }
+    if (projectWheelStepReleaseTimer.current !== undefined) {
+      window.clearTimeout(projectWheelStepReleaseTimer.current)
+      projectWheelStepReleaseTimer.current = undefined
+    }
+    projectWheelStepGestureActiveRef.current = false
     projectWheelDragRef.current.active = false
     cancelProjectWheelPreview()
 
@@ -4993,13 +5270,42 @@ function App() {
     const canStartFromTarget = Boolean(
       (event.target as HTMLElement).closest('.projectHitTarget, .projectCard'),
     )
-    if (!wheelState.active && !canStartFromTarget) return
+    if (
+      !wheelState.active &&
+      !projectWheelStepGestureActiveRef.current &&
+      !canStartFromTarget
+    ) return
     const sample = readWheelDragSample(
       event,
       viewportHeight,
       wheelState.active ? wheelState.axis : null,
     )
     if (!sample || (!wheelState.active && !sample.moves)) return
+
+    const isSingleStepGesture = sample.axis === 'y' || event.deltaMode !== 0
+    if (isSingleStepGesture) {
+      event.preventDefault()
+      event.stopPropagation()
+
+      if (projectWheelStepReleaseTimer.current !== undefined) {
+        window.clearTimeout(projectWheelStepReleaseTimer.current)
+      }
+      projectWheelStepReleaseTimer.current = window.setTimeout(() => {
+        projectWheelStepReleaseTimer.current = undefined
+        projectWheelStepGestureActiveRef.current = false
+      }, WHEEL_DRAG_END_DELAY)
+
+      if (projectWheelStepGestureActiveRef.current) return
+      projectWheelStepGestureActiveRef.current = true
+      if (
+        isReleasing ||
+        isRecycling ||
+        releaseTimer.current !== undefined ||
+        dragRaf.current !== undefined
+      ) return
+      animateProjectStep(Math.sign(sample.delta))
+      return
+    }
     if (
       !wheelState.active &&
       (isReleasing || isRecycling || releaseTimer.current !== undefined)
@@ -5139,6 +5445,11 @@ function App() {
           window.clearTimeout(projectWheelReleaseTimer.current)
           projectWheelReleaseTimer.current = undefined
         }
+        if (projectWheelStepReleaseTimer.current !== undefined) {
+          window.clearTimeout(projectWheelStepReleaseTimer.current)
+          projectWheelStepReleaseTimer.current = undefined
+        }
+        projectWheelStepGestureActiveRef.current = false
       } else {
         cancelClipWheelPreview()
         if (clipWheelReleaseTimer.current !== undefined) {
@@ -5323,7 +5634,8 @@ function App() {
         clipAddDialogId !== null ||
         clipRemoveDialogId !== null ||
         clipTagEditorId !== null ||
-        clipNoteEditorId !== null
+        clipNoteEditorId !== null ||
+        clipAiMetadataDialog !== null
       if (
         currentView === 'gallery' &&
         !projectOverlayOpen &&
@@ -5362,6 +5674,8 @@ function App() {
         setClipTagEditorStatus('')
         setClipNoteEditorId(null)
         setClipNoteDraft('')
+        clipAiMetadataRequestVersionRef.current += 1
+        setClipAiMetadataDialog(null)
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         if (projectOverlayOpen) return
@@ -5378,6 +5692,7 @@ function App() {
   }, [
     animateProjectStep,
     clipAddDialogId,
+    clipAiMetadataDialog,
     clipMenuId,
     clipNoteEditorId,
     clipRemoveDialogId,
@@ -5733,6 +6048,9 @@ function App() {
       }
       if (projectWheelReleaseTimer.current !== undefined) {
         window.clearTimeout(projectWheelReleaseTimer.current)
+      }
+      if (projectWheelStepReleaseTimer.current !== undefined) {
+        window.clearTimeout(projectWheelStepReleaseTimer.current)
       }
       if (clipWheelReleaseTimer.current !== undefined) {
         window.clearTimeout(clipWheelReleaseTimer.current)
@@ -6728,11 +7046,12 @@ function App() {
       indexedFrames: [],
       favorite: asset.favorite,
       indexTask: asset.indexTask,
-      tags: existingReference?.tags ?? ['新导入'],
+      tags: existingReference?.tags ?? [IMPORTED_CLIP_DEFAULT_TAG],
       annotated: existingReference?.annotated ?? false,
       note:
         existingReference?.note ??
-        '从系统打开的外部视频，尚未加入 Aurora。',
+        EXTERNAL_CLIP_DEFAULT_NOTE,
+      colorPreset: normalizeMediaColorPresetId(asset.colorPreset),
     }
     return { descriptor, asset, clip, sourceChanged }
   }
@@ -7139,6 +7458,19 @@ function App() {
         )
       }
       updateImportProgress('', true)
+      const autoMetadataRequests = newReferences.map((reference) => ({
+        referenceId: reference.id,
+        placeholder: {
+          tag: IMPORTED_CLIP_DEFAULT_TAG,
+          note: IMPORTED_CLIP_DEFAULT_NOTE,
+        },
+      }))
+      if (autoMetadataRequests.length > 0) {
+        window.setTimeout(() => {
+          if (!appMountedRef.current) return
+          enqueueImportedClipAutoMetadata(autoMetadataRequests)
+        }, 0)
+      }
       projectImportProgressTimerRef.current = window.setTimeout(() => {
         setProjectImportProgress(null)
         projectImportProgressTimerRef.current = undefined
@@ -8104,6 +8436,22 @@ function App() {
       setSelectedClipId(reference.id)
       setExternalVideoNavigationClipId(reference.id)
       setExternalVideoAddCandidate(null)
+      if (
+        reference.tags.length === 1 &&
+        reference.tags[0] === IMPORTED_CLIP_DEFAULT_TAG &&
+        reference.note === EXTERNAL_CLIP_DEFAULT_NOTE
+      ) {
+        window.setTimeout(() => {
+          if (!appMountedRef.current) return
+          enqueueImportedClipAutoMetadata([{
+            referenceId: reference.id,
+            placeholder: {
+              tag: IMPORTED_CLIP_DEFAULT_TAG,
+              note: EXTERNAL_CLIP_DEFAULT_NOTE,
+            },
+          }])
+        }, 0)
+      }
     }
     if (onlineCandidate) setOnlineVideoAddCandidate(null)
   }
@@ -8167,6 +8515,22 @@ function App() {
       setSelectedClipId(reference.id)
       setExternalVideoNavigationClipId(reference.id)
       setExternalVideoAddCandidate(null)
+      if (
+        reference.tags.length === 1 &&
+        reference.tags[0] === IMPORTED_CLIP_DEFAULT_TAG &&
+        reference.note === EXTERNAL_CLIP_DEFAULT_NOTE
+      ) {
+        window.setTimeout(() => {
+          if (!appMountedRef.current) return
+          enqueueImportedClipAutoMetadata([{
+            referenceId: reference.id,
+            placeholder: {
+              tag: IMPORTED_CLIP_DEFAULT_TAG,
+              note: EXTERNAL_CLIP_DEFAULT_NOTE,
+            },
+          }])
+        }, 0)
+      }
     }
     if (onlineCandidate) setOnlineVideoAddCandidate(null)
   }
@@ -8263,47 +8627,79 @@ function App() {
     }
   }
 
+  function cycleClipColorPreset(clip: VideoClip) {
+    if (clip.online) return
+    setMediaAssets((current) =>
+      current.map((asset) =>
+        asset.id === clip.assetId
+          ? {
+              ...asset,
+              colorPreset: getNextMediaColorPresetId(asset.colorPreset),
+            }
+          : asset,
+      ),
+    )
+  }
+
+  function scheduleClipColorPresetCycle(clip: VideoClip) {
+    if (detailColorPresetClickTimerRef.current !== undefined) {
+      window.clearTimeout(detailColorPresetClickTimerRef.current)
+    }
+    detailColorPresetClickTimerRef.current = window.setTimeout(() => {
+      detailColorPresetClickTimerRef.current = undefined
+      cycleClipColorPreset(clip)
+    }, 200)
+  }
+
+  function resetClipColorPreset(clip: VideoClip) {
+    if (clip.online) return
+    if (detailColorPresetClickTimerRef.current !== undefined) {
+      window.clearTimeout(detailColorPresetClickTimerRef.current)
+      detailColorPresetClickTimerRef.current = undefined
+    }
+    setMediaAssets((current) =>
+      current.map((asset) =>
+        asset.id === clip.assetId
+          ? { ...asset, colorPreset: 'original' }
+          : asset,
+      ),
+    )
+  }
+
   async function toggleDetailPreviewPlayback(clip: VideoClip) {
     if (clip.online) {
       openFrameRing(clip.id)
       return
     }
-    const sourceUrl = clip.sourceUrl
+    const previewState = lightweightPreviewByAsset[clip.assetId]
+    const matchingPreview =
+      previewState?.sourcePath === clip.sourcePath ? previewState : undefined
+    const sourceUrl =
+      matchingPreview?.status === 'ready' && matchingPreview.playbackPath
+        ? resolveLibraryMediaUrl(matchingPreview.playbackPath)
+        : null
     if (!sourceUrl) {
-      showClipActionNotice(
-        '当前素材没有可读取的视频源，请在桌面程序中重新导入或定位原视频。',
-      )
-      return
-    }
-
-    if (
-      clip.sampleCount <= 0 &&
-      requiresKnownVideoPreviewProxy(clip.codec)
-    ) {
-      const previewState = previewPlaybackByAsset[clip.assetId]
-      const compatiblePreviewReady =
-        previewState?.sourcePath === clip.sourcePath &&
-        previewState.status === 'ready' &&
-        previewState.usesPreviewProxy
-      if (!compatiblePreviewReady) {
-        const retry = previewState?.status === 'failed'
+      if (!clip.sourcePath) {
+        showClipActionNotice(
+          '当前素材没有可读取的视频源，请在桌面程序中重新导入或定位原视频。',
+        )
+      } else {
+        const retry = matchingPreview?.status === 'failed'
         showClipActionNotice(
           retry
-            ? '兼容视频预览准备失败，正在重新尝试…'
-            : '正在准备兼容视频预览，请稍候…',
+            ? '轻量视频预览准备失败，正在重新尝试…'
+            : '正在准备轻量视频预览，请稍候…',
         )
-        if (previewState?.status !== 'preparing') {
-          void ensureClipPreview(clip, true, retry)
+        if (matchingPreview?.status !== 'preparing') {
+          void ensureLightweightPreview(clip, retry)
         }
-        return
       }
+      return
     }
 
     if (detailPreviewFailedSource === sourceUrl) {
       showClipActionNotice(
-        clip.sampleCount > 0
-          ? '当前预览代理无法播放，请重新建立视觉索引。'
-          : '当前编码无法直接预览，请先建立视觉索引生成播放代理。',
+        '当前轻量预览无法播放，请重新进入项目后重试。',
       )
       return
     }
@@ -8321,11 +8717,7 @@ function App() {
     } catch {
       setDetailPreviewPlayingKey(null)
       setDetailPreviewFailedSource(sourceUrl)
-      showClipActionNotice(
-        clip.sampleCount > 0
-          ? '当前预览代理无法播放，请重新建立视觉索引。'
-          : '当前编码无法直接预览，请先建立视觉索引生成播放代理。',
-      )
+      showClipActionNotice('当前轻量预览无法播放，请重新进入项目后重试。')
     }
   }
 
@@ -8333,8 +8725,8 @@ function App() {
     clipId: string,
     patch: Partial<Pick<ProjectAssetRef, 'tags' | 'note'>>,
   ) {
-    setProjectAssetRefs((current) =>
-      current.map((reference) =>
+    setProjectAssetRefs((current) => {
+      const next = current.map((reference) =>
         reference.id === clipId
           ? {
               ...reference,
@@ -8344,8 +8736,10 @@ function App() {
                 (patch.note ?? reference.note).trim().length > 0,
             }
           : reference,
-      ),
-    )
+      )
+      projectAssetRefsRef.current = next
+      return next
+    })
   }
 
   function removeClipTag(clip: VideoClip, tag: string) {
@@ -8399,6 +8793,357 @@ function App() {
     })
     setClipNoteEditorId(null)
     setClipNoteDraft('')
+  }
+
+  function captureClipAiMetadataTarget(
+    clipId: string,
+  ): ClipAiMetadataTarget | null {
+    const reference = projectAssetRefsRef.current.find(
+      (entry) => entry.id === clipId,
+    )
+    if (!reference) return null
+    const asset = mediaAssetsRef.current.find(
+      (entry) => entry.id === reference.assetId,
+    )
+    const project = projectsRef.current.find(
+      (entry) => entry.id === reference.projectId,
+    )
+    if (
+      !asset?.sourcePath ||
+      isOnlineMediaAsset(asset) ||
+      !project ||
+      (project.kind ?? 'video') !== 'video'
+    ) {
+      return null
+    }
+
+    const visualIndex = visualIndexesRef.current.find(
+      (entry) =>
+        entry.assetId === asset.id &&
+        entry.sourceFingerprint === asset.sourceFingerprint,
+    )
+    const excludedFrameIds = new Set(
+      frameExclusionsRef.current.flatMap((exclusion) =>
+        exclusion.assetId === asset.id &&
+        exclusion.sourceFingerprint === asset.sourceFingerprint
+          ? [exclusion.frameId]
+          : [],
+      ),
+    )
+    const candidates = createAiVisualSearchCandidates({
+      clips: [{
+        id: reference.id,
+        assetId: asset.id,
+        projectId: reference.projectId,
+        filename: asset.filename,
+        sourceFingerprint: asset.sourceFingerprint,
+        durationSeconds: asset.durationSeconds,
+        tags: reference.tags,
+        note: reference.note,
+        indexedFrames: (visualIndex?.frames ?? []).flatMap((frame) =>
+          excludedFrameIds.has(frame.id)
+            ? []
+            : [{
+                id: frame.id,
+                imagePath: frame.imagePath,
+                timeSeconds: frame.timeSeconds,
+              }],
+        ),
+      }],
+      assets: [asset],
+      projects: [project],
+    }).sort((left, right) => left.timeSeconds - right.timeSeconds)
+    if (candidates.length === 0) return null
+
+    const evidenceTier = candidates[0].analysisTier
+    return {
+      clipId: reference.id,
+      assetId: asset.id,
+      projectId: reference.projectId,
+      filename: asset.filename,
+      sourceFingerprint: asset.sourceFingerprint,
+      evidenceRevision:
+        evidenceTier === 'visual-index'
+          ? `visual-index:${visualIndex?.createdAt ?? ''}`
+          : `thumbnail:${asset.thumbnail ?? ''}`,
+      evidenceTier,
+      candidates,
+    }
+  }
+
+  function clipAiMetadataTargetIsCurrent(target: ClipAiMetadataTarget) {
+    const current = captureClipAiMetadataTarget(target.clipId)
+    return Boolean(
+      current &&
+        current.assetId === target.assetId &&
+        current.sourceFingerprint === target.sourceFingerprint &&
+        current.evidenceRevision === target.evidenceRevision,
+    )
+  }
+
+  async function analyzeClipAiMetadata(
+    clipId: string,
+  ): Promise<ClipAiMetadataAnalysisResult> {
+    const bridge = window.desktopBridge
+    if (!bridge?.analyzeAiVisualFrames) {
+      throw new Error('AI 画面理解仅可在 Aurora 桌面版中使用')
+    }
+    const visionProfileId =
+      aiServiceProfilesStateRef.current.activeVisionProfileId
+    if (!visionProfileId) {
+      throw new Error('请先在探索页设置中选择画面理解模型')
+    }
+    const target = captureClipAiMetadataTarget(clipId)
+    if (!target) {
+      throw new Error('当前素材还没有可用于识别的关键帧或本地缩略图')
+    }
+
+    const candidates = selectClipAiRepresentativeFrames(
+      target.candidates,
+      CLIP_AI_REPRESENTATIVE_FRAME_LIMIT,
+    )
+    const response = await bridge.analyzeAiVisualFrames({
+      visionProfileId,
+      candidates,
+    })
+    if (!response.ok) throw new Error(response.error.message)
+    if (!clipAiMetadataTargetIsCurrent(target)) {
+      throw new Error('识别期间素材画面已变化，请重新识别')
+    }
+
+    const requestedResultIds = new Set(
+      candidates.map((candidate) => candidate.resultId),
+    )
+    const frames = response.data.frames.filter((frame) =>
+      requestedResultIds.has(frame.resultId),
+    )
+    if (frames.length === 0) {
+      throw new Error('视觉模型没有返回可用的片段描述')
+    }
+    const suggestion = createClipAiMetadataSuggestion(frames, {
+      maxTags: CLIP_DETAIL_TAG_MAX_COUNT,
+      maxTagLength: CLIP_DETAIL_TAG_MAX_LENGTH,
+      maxNoteLength: CLIP_DETAIL_NOTE_MAX_LENGTH,
+    })
+    if (suggestion.tags.length === 0 && !suggestion.note) {
+      throw new Error('暂时没有识别出适合写入的标签或备注')
+    }
+    return {
+      target,
+      suggestion,
+      evidenceCount: frames.length,
+      newlyAnalyzedFrameCount: response.data.newlyAnalyzedFrameCount,
+    }
+  }
+
+  function closeClipAiMetadataDialog() {
+    clipAiMetadataRequestVersionRef.current += 1
+    setClipAiMetadataDialog(null)
+  }
+
+  async function openClipAiMetadataDialog(clip: VideoClip) {
+    if (clip.online) return
+    if (!clip.sourcePath) {
+      showClipActionNotice('当前素材无法访问本地文件，请重新定位或导入后再识别。')
+      return
+    }
+    if (!window.desktopBridge?.analyzeAiVisualFrames) {
+      showClipActionNotice('AI 画面理解仅可在 Aurora 桌面版中使用。')
+      return
+    }
+    if (!aiServiceProfilesStateRef.current.activeVisionProfileId) {
+      showClipActionNotice('请先在探索页设置中选择画面理解模型。')
+      return
+    }
+
+    const requestVersion = clipAiMetadataRequestVersionRef.current + 1
+    clipAiMetadataRequestVersionRef.current = requestVersion
+    setClipAiMetadataDialog({
+      clipId: clip.id,
+      filename: clip.filename,
+      status: 'analyzing',
+      tags: [],
+      selectedTags: [],
+      note: '',
+      applyNote: false,
+      evidenceCount: 0,
+      evidenceTier: null,
+      newlyAnalyzedFrameCount: 0,
+      error: null,
+    })
+
+    try {
+      const result = await analyzeClipAiMetadata(clip.id)
+      if (clipAiMetadataRequestVersionRef.current !== requestVersion) return
+      const reference = projectAssetRefsRef.current.find(
+        (entry) => entry.id === clip.id,
+      )
+      if (!reference) throw new Error('当前项目中的素材引用已移除')
+      const existingTagKeys = new Set(
+        reference.tags.map((tag) =>
+          tag.trim().replace(/^#+/u, '').toLocaleLowerCase('zh-CN'),
+        ),
+      )
+      const availableTagCount = Math.max(
+        0,
+        CLIP_DETAIL_TAG_MAX_COUNT - reference.tags.length,
+      )
+      const suggestedTags = result.suggestion.tags.filter(
+        (tag) => !existingTagKeys.has(tag.toLocaleLowerCase('zh-CN')),
+      )
+      setClipAiMetadataDialog({
+        clipId: clip.id,
+        filename: clip.filename,
+        status: 'ready',
+        tags: suggestedTags,
+        selectedTags: suggestedTags.slice(0, availableTagCount),
+        note: result.suggestion.note,
+        applyNote:
+          Boolean(result.suggestion.note) &&
+          (!reference.note.trim() || reference.note === IMPORTED_CLIP_DEFAULT_NOTE),
+        evidenceCount: result.evidenceCount,
+        evidenceTier: result.target.evidenceTier,
+        newlyAnalyzedFrameCount: result.newlyAnalyzedFrameCount,
+        error: null,
+      })
+    } catch (error) {
+      if (clipAiMetadataRequestVersionRef.current !== requestVersion) return
+      setClipAiMetadataDialog((current) =>
+        current?.clipId === clip.id
+          ? {
+              ...current,
+              status: 'error',
+              error:
+                error instanceof Error ? error.message : '片段识别失败',
+            }
+          : current,
+      )
+    }
+  }
+
+  function toggleClipAiMetadataTag(tag: string) {
+    setClipAiMetadataDialog((current) => {
+      if (!current || current.status !== 'ready') return current
+      if (current.selectedTags.includes(tag)) {
+        return {
+          ...current,
+          selectedTags: current.selectedTags.filter((entry) => entry !== tag),
+        }
+      }
+      const reference = projectAssetRefsRef.current.find(
+        (entry) => entry.id === current.clipId,
+      )
+      const availableTagCount = Math.max(
+        0,
+        CLIP_DETAIL_TAG_MAX_COUNT - (reference?.tags.length ?? 0),
+      )
+      if (current.selectedTags.length >= availableTagCount) return current
+      return { ...current, selectedTags: [...current.selectedTags, tag] }
+    })
+  }
+
+  function applyClipAiMetadataSuggestion() {
+    const dialog = clipAiMetadataDialog
+    if (!dialog || dialog.status !== 'ready') return
+    const reference = projectAssetRefsRef.current.find(
+      (entry) => entry.id === dialog.clipId,
+    )
+    if (!reference) {
+      closeClipAiMetadataDialog()
+      return
+    }
+    const patch: Partial<Pick<ProjectAssetRef, 'tags' | 'note'>> = {}
+    if (dialog.selectedTags.length > 0) {
+      patch.tags = mergeClipAiTags(
+        reference.tags,
+        dialog.selectedTags,
+        CLIP_DETAIL_TAG_MAX_COUNT,
+      )
+    }
+    if (dialog.applyNote && dialog.note) patch.note = dialog.note
+    if (patch.tags || patch.note !== undefined) {
+      updateClipReferenceMetadata(dialog.clipId, patch)
+      showClipActionNotice('AI 标签与备注已应用，可继续手动修改。')
+    }
+    closeClipAiMetadataDialog()
+  }
+
+  async function autoAnnotateImportedClipReferences(
+    requests: readonly ImportedClipAiMetadataRequest[],
+  ) {
+    if (!window.desktopBridge?.analyzeAiVisualFrames) return
+    if (!aiServiceProfilesStateRef.current.activeVisionProfileId) {
+      showClipActionNotice(
+        '素材已导入；选择画面理解模型后，可在详情页使用 AI 识别。',
+      )
+      return
+    }
+
+    showClipActionNotice('素材已导入，正在自动识别标签与备注…')
+    let appliedCount = 0
+    let failedCount = 0
+    const uniqueRequests = [
+      ...new Map(
+        requests.map((request) => [request.referenceId, request]),
+      ).values(),
+    ]
+    for (const request of uniqueRequests) {
+      if (!appMountedRef.current) return
+      const { referenceId } = request
+      try {
+        const result = await analyzeClipAiMetadata(referenceId)
+        const currentReference = projectAssetRefsRef.current.find(
+          (reference) => reference.id === referenceId,
+        )
+        if (!currentReference) continue
+        const patch = createImportedClipAiMetadataPatch(
+          currentReference,
+          result.suggestion,
+          request.placeholder,
+        )
+        if (!patch) continue
+        setProjectAssetRefs((current) => {
+          const next = current.map((reference) =>
+            reference.id === referenceId
+              ? {
+                  ...reference,
+                  ...patch,
+                  annotated:
+                    (patch.tags ?? reference.tags).length > 0 ||
+                    (patch.note ?? reference.note).trim().length > 0,
+                }
+              : reference,
+          )
+          projectAssetRefsRef.current = next
+          return next
+        })
+        appliedCount += 1
+      } catch (error) {
+        failedCount += 1
+        console.warn(
+          `[Aurora library] Failed to auto annotate ${referenceId}`,
+          error,
+        )
+      }
+    }
+
+    if (!appMountedRef.current) return
+    if (appliedCount > 0) {
+      showClipActionNotice(
+        `已自动为 ${appliedCount} 个新素材添加标签与备注。`,
+      )
+    } else if (failedCount > 0) {
+      showClipActionNotice('自动标注暂未完成，可稍后在详情页重新识别。')
+    }
+  }
+
+  function enqueueImportedClipAutoMetadata(
+    requests: readonly ImportedClipAiMetadataRequest[],
+  ) {
+    if (requests.length === 0) return
+    const run = () => autoAnnotateImportedClipReferences(requests)
+    importedClipAiMetadataQueueRef.current =
+      importedClipAiMetadataQueueRef.current.then(run, run)
   }
 
   const ensureClipPreview = useCallback(async (
@@ -10050,7 +10795,9 @@ function App() {
     return (
       <>
         <span className="videoClipSurface" />
-        <span className="videoClipImage" />
+        <span className="videoClipImage">
+          <span className="videoClipColorImage" />
+        </span>
         <span className="videoClipFrame" aria-hidden="true" />
         <span className="videoClipLight" aria-hidden="true" />
         {clip.resolutionBadge && (
@@ -11107,6 +11854,9 @@ function App() {
                 style={
                   {
                     '--clip-cover': toCssImageValue(clip.thumbnail),
+                    '--media-color-filter': getMediaColorPreset(
+                      clip.colorPreset,
+                    ).cssFilter,
                   } as CSSProperties
                 }
               >
@@ -11148,6 +11898,9 @@ function App() {
                       videoLibraryLayout,
                     ),
                     '--clip-cover': toCssImageValue(clip.thumbnail),
+                    '--media-color-filter': getMediaColorPreset(
+                      clip.colorPreset,
+                    ).cssFilter,
                   } as CSSProperties
 
                 return (
@@ -11178,11 +11931,16 @@ function App() {
                   ref={clipHoverScrubVideoRef}
                   className="videoClipHoverScrubVideo"
                   data-clip-id={clipHoverScrubVideoPortal.clipId}
+                  data-preview-profile={
+                    clipHoverScrubVideoPortal.lightweight
+                      ? 'lightweight'
+                      : 'source'
+                  }
                   src={clipHoverScrubVideoPortal.sourceUrl}
                   poster={clipHoverScrubVideoPortal.poster}
                   muted
                   playsInline
-                  preload="metadata"
+                  preload="auto"
                   disablePictureInPicture
                   aria-hidden="true"
                   onLoadedMetadata={(event) =>
@@ -11192,9 +11950,10 @@ function App() {
                     seekClipHoverScrubVideo(event.currentTarget)
                     markClipHoverScrubVideoReady(event.currentTarget)
                   }}
-                  onSeeked={(event) =>
+                  onSeeked={(event) => {
                     markClipHoverScrubVideoReady(event.currentTarget)
-                  }
+                    seekClipHoverScrubVideo(event.currentTarget)
+                  }}
                   onError={() =>
                     handleClipHoverScrubVideoError(
                       clipHoverScrubVideoPortal.clipId,
@@ -11426,37 +12185,36 @@ function App() {
                     className="detailPreview"
                     style={{
                       '--clip-cover': toCssImageValue(detailClip.thumbnail),
+                      '--media-color-filter': detailColorPreset.cssFilter,
                     } as CSSProperties}
                   >
-                    {detailClip.sourceUrl &&
-                      !detailCompatibilityPreviewRequired &&
-                      detailPreviewFailedSource !== detailClip.sourceUrl && (
+                    <span className="detailPreviewPoster" aria-hidden="true" />
+                    {detailPreviewSourceUrl &&
+                      detailPreviewFailedSource !== detailPreviewSourceUrl && (
                         <>
                           <video
-                            key={`${detailClip.id}:${detailClip.sourceUrl}`}
+                            key={`${detailClip.id}:${detailPreviewSourceUrl}`}
                             ref={detailPreviewVideoRef}
                             className="detailPreviewVideo"
-                            src={detailClip.sourceUrl}
+                            src={detailPreviewSourceUrl}
                             poster={detailClip.thumbnail}
-                            preload="metadata"
+                            preload="auto"
                             playsInline
                             onPlay={() =>
                               setDetailPreviewPlayingKey(
-                                getDetailPreviewPlaybackKey(detailClip),
+                                detailPreviewPlaybackKey,
                               )
                             }
                             onPause={() =>
                               setDetailPreviewPlayingKey((current) =>
-                                current ===
-                                getDetailPreviewPlaybackKey(detailClip)
+                                current === detailPreviewPlaybackKey
                                   ? null
                                   : current,
                               )
                             }
                             onEnded={() =>
                               setDetailPreviewPlayingKey((current) =>
-                                current ===
-                                getDetailPreviewPlaybackKey(detailClip)
+                                current === detailPreviewPlaybackKey
                                   ? null
                                   : current,
                               )
@@ -11464,7 +12222,7 @@ function App() {
                             onError={() => {
                               setDetailPreviewPlayingKey(null)
                               setDetailPreviewFailedSource(
-                                detailClip.sourceUrl,
+                                detailPreviewSourceUrl,
                               )
                             }}
                           />
@@ -11474,6 +12232,30 @@ function App() {
                           />
                         </>
                       )}
+                    {!detailClip.online && (
+                      <button
+                        className={`detailPreviewColorPresetButton ${
+                          detailColorPreset.id === 'original' ? '' : 'active'
+                        }`}
+                        type="button"
+                        data-camera-gesture="block"
+                        data-color-preset={detailColorPreset.id}
+                        aria-label={`颜色预设：${detailColorPreset.label}。单击切换，双击恢复原始`}
+                        title="单击切换颜色预设，双击恢复原始"
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          scheduleClipColorPresetCycle(detailClip)
+                        }}
+                        onDoubleClick={(event) => {
+                          event.preventDefault()
+                          event.stopPropagation()
+                          resetClipColorPreset(detailClip)
+                        }}
+                      >
+                        {detailColorPreset.label}
+                      </button>
+                    )}
                     <button
                       className="detailPreviewPlayButton"
                       type="button"
@@ -11507,6 +12289,14 @@ function App() {
                     </button>
                   </div>
 
+                  <div
+                    className="detailPanelMetadata"
+                    data-compact={
+                      detailClip.tags.length >= 5 && detailClip.note.trim()
+                        ? 'true'
+                        : undefined
+                    }
+                  >
                   <section className="clipFacts" aria-label="基本信息">
                     <h2>基本信息</h2>
                     {(detailClip.online
@@ -11549,7 +12339,30 @@ function App() {
                   </section>
 
                   <section className="detailTagCloud" aria-label="标签">
-                    <h2>标签</h2>
+                    <header className="detailTagHeader">
+                      <h2>标签</h2>
+                      {!detailClip.online && (
+                        <button
+                          className="detailAiMetadataButton"
+                          type="button"
+                          aria-label="AI 识别标签与备注"
+                          title="识别片段画面并推荐标签与备注"
+                          disabled={
+                            clipAiMetadataDialog?.clipId === detailClip.id &&
+                            clipAiMetadataDialog.status === 'analyzing'
+                          }
+                          onClick={() =>
+                            void openClipAiMetadataDialog(detailClip)
+                          }
+                        >
+                          <Sparkles
+                            size={11 * videoLibraryLayout.panelContentScale}
+                            strokeWidth={1.55}
+                          />
+                          AI 识别
+                        </button>
+                      )}
+                    </header>
                     <div>
                       {detailClip.tags.map((tag) => (
                         <button
@@ -11564,26 +12377,17 @@ function App() {
                           <span aria-hidden="true">×</span>
                         </button>
                       ))}
-                      <button
-                        className="detailTagAddButton"
-                        type="button"
-                        aria-label={
-                          detailClip.tags.length >= CLIP_DETAIL_TAG_MAX_COUNT
-                            ? '标签已满'
-                            : '添加标签'
-                        }
-                        title={
-                          detailClip.tags.length >= CLIP_DETAIL_TAG_MAX_COUNT
-                            ? `最多保留 ${CLIP_DETAIL_TAG_MAX_COUNT} 个标签`
-                            : '添加标签'
-                        }
-                        disabled={
-                          detailClip.tags.length >= CLIP_DETAIL_TAG_MAX_COUNT
-                        }
-                        onClick={() => openClipTagEditor(detailClip)}
-                      >
-                        <Plus size={12 * videoLibraryLayout.panelContentScale} strokeWidth={1.7} />
-                      </button>
+                      {detailClip.tags.length < CLIP_DETAIL_TAG_MAX_COUNT && (
+                        <button
+                          className="detailTagAddButton"
+                          type="button"
+                          aria-label="添加标签"
+                          title="添加标签"
+                          onClick={() => openClipTagEditor(detailClip)}
+                        >
+                          <Plus size={12 * videoLibraryLayout.panelContentScale} strokeWidth={1.7} />
+                        </button>
+                      )}
                     </div>
                   </section>
 
@@ -11600,6 +12404,7 @@ function App() {
                     </div>
                     <p>{detailClip.note || '暂无备注'}</p>
                   </section>
+                  </div>
 
                   <section className="detailIndexStatus" aria-label="视觉索引">
                     <span>
@@ -12678,6 +13483,211 @@ function App() {
               </button>
             </footer>
           </form>
+        </div>
+      )}
+
+      {clipAiMetadataDialog && (
+        <div
+          className="overlay clipMetadataEditorOverlay clipAiMetadataOverlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`AI 识别 ${clipAiMetadataDialog.filename}`}
+          data-camera-gesture="block"
+          onPointerDown={(event) => {
+            if (event.target !== event.currentTarget) return
+            closeClipAiMetadataDialog()
+          }}
+        >
+          <section
+            className="createPanel clipAiMetadataPanel uiGlassShell"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <button
+              className="panelClose uiGlassInteractive"
+              type="button"
+              aria-label="关闭 AI 识别"
+              onClick={closeClipAiMetadataDialog}
+            >
+              <X size={17} />
+            </button>
+            <header className="createPanelHeader">
+              <span className="sheetEyebrow">AI Clip Metadata</span>
+              <h2>识别标签与备注</h2>
+              <p>
+                识别结果只会写入当前项目；应用后仍可继续手动修改。
+              </p>
+            </header>
+
+            <div className="clipMetadataContext uiGlassInset">
+              <strong>{clipAiMetadataDialog.filename}</strong>
+              <small>
+                {clipAiMetadataDialog.status === 'ready'
+                  ? clipAiMetadataDialog.evidenceTier === 'visual-index'
+                    ? `基于 ${clipAiMetadataDialog.evidenceCount} 个关键帧`
+                    : '基于本地预览图'
+                  : '片段画面理解'}
+              </small>
+            </div>
+
+            {clipAiMetadataDialog.status === 'analyzing' && (
+              <div className="clipAiMetadataState" role="status">
+                <RefreshCw
+                  className="clipAiMetadataSpinner"
+                  size={22}
+                  strokeWidth={1.45}
+                />
+                <strong>正在理解片段画面…</strong>
+                <small>已分析过的关键帧会直接复用缓存。</small>
+              </div>
+            )}
+
+            {clipAiMetadataDialog.status === 'error' && (
+              <div className="clipAiMetadataState clipAiMetadataError" role="alert">
+                <Sparkles size={22} strokeWidth={1.45} />
+                <strong>暂时无法完成识别</strong>
+                <small>{clipAiMetadataDialog.error}</small>
+              </div>
+            )}
+
+            {clipAiMetadataDialog.status === 'ready' && (
+              <>
+                <section className="clipAiMetadataSuggestionGroup">
+                  <header>
+                    <strong>推荐标签</strong>
+                    <small>
+                      已选择 {clipAiMetadataDialog.selectedTags.length} 个
+                    </small>
+                  </header>
+                  {clipAiMetadataDialog.tags.length > 0 ? (
+                    <div
+                      className="clipAiMetadataTagChoices"
+                      role="group"
+                      aria-label="选择 AI 推荐标签"
+                    >
+                      {clipAiMetadataDialog.tags.map((tag) => {
+                        const selected =
+                          clipAiMetadataDialog.selectedTags.includes(tag)
+                        const availableTagCount = Math.max(
+                          0,
+                          CLIP_DETAIL_TAG_MAX_COUNT -
+                            (clipAiMetadataDialogClip?.tags.length ?? 0),
+                        )
+                        return (
+                          <button
+                            className={selected ? 'selected' : undefined}
+                            key={tag}
+                            type="button"
+                            aria-pressed={selected}
+                            disabled={
+                              !selected &&
+                              clipAiMetadataDialog.selectedTags.length >=
+                                availableTagCount
+                            }
+                            onClick={() => toggleClipAiMetadataTag(tag)}
+                          >
+                            {selected && <Check size={12} strokeWidth={1.8} />}
+                            {tag}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  ) : (
+                    <p className="clipAiMetadataEmptySuggestion">
+                      没有发现需要补充的新标签。
+                    </p>
+                  )}
+                  {(clipAiMetadataDialogClip?.tags.length ?? 0) >=
+                    CLIP_DETAIL_TAG_MAX_COUNT && (
+                    <small className="clipAiMetadataLimitHint">
+                      当前标签已满；可应用备注，或关闭后先删除一个标签。
+                    </small>
+                  )}
+                </section>
+
+                <section className="clipAiMetadataSuggestionGroup">
+                  <header>
+                    <strong>备注建议</strong>
+                    <small>
+                      {clipAiMetadataDialogClip?.note
+                        ? '选中后替换当前备注'
+                        : '可选'}
+                    </small>
+                  </header>
+                  <button
+                    className={`clipAiMetadataNoteChoice${
+                      clipAiMetadataDialog.applyNote ? ' selected' : ''
+                    }`}
+                    type="button"
+                    aria-pressed={clipAiMetadataDialog.applyNote}
+                    disabled={!clipAiMetadataDialog.note}
+                    onClick={() =>
+                      setClipAiMetadataDialog((current) =>
+                        current?.status === 'ready'
+                          ? { ...current, applyNote: !current.applyNote }
+                          : current,
+                      )
+                    }
+                  >
+                    <span>{clipAiMetadataDialog.note || '暂无备注建议'}</span>
+                    <span className="clipAiMetadataChoiceState" aria-hidden="true">
+                      {clipAiMetadataDialog.applyNote && (
+                        <Check size={14} strokeWidth={1.8} />
+                      )}
+                    </span>
+                  </button>
+                </section>
+
+                <div className="clipAiMetadataEvidence">
+                  <span>
+                    {clipAiMetadataDialog.newlyAnalyzedFrameCount === 0
+                      ? '本次结果已复用视觉缓存'
+                      : `新分析 ${clipAiMetadataDialog.newlyAnalyzedFrameCount} 个画面`}
+                  </span>
+                  {clipAiMetadataDialog.evidenceTier === 'thumbnail' && (
+                    <span>建立视觉索引后可获得更完整结果</span>
+                  )}
+                </div>
+              </>
+            )}
+
+            <footer className="createPanelActions">
+              <button
+                className="secondaryAction uiGlassInset uiGlassInteractive"
+                type="button"
+                onClick={closeClipAiMetadataDialog}
+              >
+                取消
+              </button>
+              {clipAiMetadataDialog.status === 'error' ? (
+                <button
+                  className="primaryAction uiGlassInset uiGlassInteractive active"
+                  type="button"
+                  disabled={!clipAiMetadataDialogClip}
+                  onClick={() => {
+                    if (!clipAiMetadataDialogClip) return
+                    void openClipAiMetadataDialog(clipAiMetadataDialogClip)
+                  }}
+                >
+                  <RefreshCw size={15} strokeWidth={1.65} />
+                  重新识别
+                </button>
+              ) : (
+                <button
+                  className="primaryAction uiGlassInset uiGlassInteractive active"
+                  type="button"
+                  disabled={
+                    clipAiMetadataDialog.status !== 'ready' ||
+                    (clipAiMetadataDialog.selectedTags.length === 0 &&
+                      !clipAiMetadataDialog.applyNote)
+                  }
+                  onClick={applyClipAiMetadataSuggestion}
+                >
+                  <Sparkles size={15} strokeWidth={1.65} />
+                  应用所选内容
+                </button>
+              )}
+            </footer>
+          </section>
         </div>
       )}
 

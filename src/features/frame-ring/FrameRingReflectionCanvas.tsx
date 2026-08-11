@@ -1,6 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import type { Project } from '../../data/projects'
+import {
+  combineMediaColorFilters,
+  getMediaColorPreset,
+} from '../../data/mediaColorPresets'
 import type { BackgroundReflectionSurface } from '../reflection/backgroundReflectionSurfaceProtocol'
 import {
   createReflectionContentRevision,
@@ -116,6 +120,7 @@ export function FrameRingReflectionCanvas({
   surfaceData = null,
 }: FrameRingReflectionCanvasProps) {
   const reflectionRuntimeVersion = FRAME_RING_REFLECTION_RUNTIME_VERSION
+  const mediaColorFilter = getMediaColorPreset(clip.colorPreset).cssFilter
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const invalidateRef = useRef<() => void>(() => undefined)
   const rendererRef = useRef<ReturnType<typeof createIceReflectionRenderer>>(null)
@@ -761,7 +766,10 @@ export function FrameRingReflectionCanvas({
             mediaRect,
             objectFit: videoStyle.objectFit || 'contain',
             objectPosition: videoStyle.objectPosition || '50% 50%',
-            colorFilter: pageColorGradeFilter || 'none',
+            colorFilter: combineMediaColorFilters(
+              mediaColorFilter,
+              pageColorGradeFilter,
+            ),
             maskImage,
           })
           const scratchContext = scratchTarget.getContext('2d')
@@ -912,6 +920,7 @@ export function FrameRingReflectionCanvas({
     }
   }, [
     materialTintFilter,
+    mediaColorFilter,
     pageColorGradeFilter,
     previewCaptureRevision,
     previewVideoRef,

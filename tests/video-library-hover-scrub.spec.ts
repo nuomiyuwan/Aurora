@@ -8,7 +8,9 @@ test('maps idle mouse movement across a clip preview to its full timeline', asyn
   const result = await page.evaluate(async () => {
     const {
       resolveVideoClipHoverFrameIndex,
+      resolveVideoClipHoverPlaybackSource,
       resolveVideoClipHoverProgress,
+      resolveVideoClipHoverSeekTime,
       resolveVideoClipHoverTime,
       shouldHandleVideoClipHoverPointer,
     } = await import(
@@ -37,6 +39,16 @@ test('maps idle mouse movement across a clip preview to its full timeline', asyn
       middleTime: resolveVideoClipHoverTime(0.5, 120),
       boundedTime: resolveVideoClipHoverTime(2, 120),
       invalidTime: resolveVideoClipHoverTime(0.5, 0),
+      quantizedSeek: resolveVideoClipHoverSeekTime(0.501, 120),
+      guardedEndSeek: resolveVideoClipHoverSeekTime(1, 120),
+      warmingSource: resolveVideoClipHoverPlaybackSource(
+        null,
+        'aurora-media://source.mov',
+      ),
+      readyLightweightSource: resolveVideoClipHoverPlaybackSource(
+        'aurora-media://lightweight.mp4',
+        'aurora-media://source.mov',
+      ),
       timedFrame: resolveVideoClipHoverFrameIndex(
         0.52,
         [0, 20, 60, 90, 120],
@@ -66,7 +78,7 @@ test('maps idle mouse movement across a clip preview to its full timeline', asyn
     }
   })
 
-  expect(result).toEqual({
+  expect(result).toMatchObject({
     left: 0,
     quarter: 0.25,
     middle: 0.5,
@@ -77,6 +89,8 @@ test('maps idle mouse movement across a clip preview to its full timeline', asyn
     middleTime: 60,
     boundedTime: 120,
     invalidTime: null,
+    warmingSource: 'aurora-media://source.mov',
+    readyLightweightSource: 'aurora-media://lightweight.mp4',
     timedFrame: 2,
     fallbackFrame: 2,
     idleMouse: true,
@@ -84,4 +98,6 @@ test('maps idle mouse movement across a clip preview to its full timeline', asyn
     touch: false,
     pen: false,
   })
+  expect(result.quantizedSeek).toBeCloseTo(60.083333, 6)
+  expect(result.guardedEndSeek).toBeCloseTo(119.916667, 6)
 })

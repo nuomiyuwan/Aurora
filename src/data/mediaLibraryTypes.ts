@@ -1,4 +1,5 @@
 import type { OnlineMediaProvider } from './onlineProviderRegistry'
+import type { MediaColorPresetId } from './mediaColorPresets'
 
 export type MediaIndexTask =
   | 'idle'
@@ -46,6 +47,8 @@ export type MediaAsset = {
   fpsValue: number | null
   sizeBytes: number | null
   indexError: string | null
+  /** Local preview look. Missing legacy values are treated as original. */
+  colorPreset?: MediaColorPresetId
   online?: OnlineMediaDescriptor
 }
 

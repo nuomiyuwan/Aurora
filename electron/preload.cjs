@@ -38,6 +38,8 @@ contextBridge.exposeInMainWorld('desktopBridge', {
   minimizeWindow: () => ipcRenderer.send('window-controls:minimize'),
   toggleMaximizeWindow: () =>
     ipcRenderer.invoke('window-controls:toggle-maximize'),
+  toggleFullscreenWindow: () =>
+    ipcRenderer.invoke('window-controls:toggle-fullscreen'),
   getWindowMaximizedState: () =>
     ipcRenderer.invoke('window-controls:get-maximized-state'),
   onWindowMaximizedStateChange: (listener) => {

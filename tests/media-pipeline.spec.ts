@@ -48,6 +48,7 @@ const { createMediaPipeline } = require('../electron/mediaPipeline.cjs') as {
       assetId: string
       forceProxy?: boolean
       operationId: string
+      profile?: 'playback' | 'lightweight'
       rebuild?: boolean
       sourcePath: string
     }) => Promise<{
@@ -442,6 +443,131 @@ test('preview-only proxy is cached without creating a visual index', async () =>
       usesPreviewProxy: true,
     })
     expect('frames' in reused).toBe(false)
+  } finally {
+    if (previousFfmpegPath == null) {
+      delete process.env.AURORA_FFMPEG_PATH
+    } else {
+      process.env.AURORA_FFMPEG_PATH = previousFfmpegPath
+    }
+    if (previousFfprobePath == null) {
+      delete process.env.AURORA_FFPROBE_PATH
+    } else {
+      process.env.AURORA_FFPROBE_PATH = previousFfprobePath
+    }
+    await rm(testDirectory, { recursive: true, force: true })
+  }
+})
+
+test('lightweight card and detail preview is low resolution, seekable, and cached separately', async () => {
+  const ffmpegPath = resolveMediaTool('ffmpeg')
+  const ffprobePath = resolveMediaTool('ffprobe')
+  test.skip(
+    !ffmpegPath || !ffprobePath,
+    'This integration test requires ffmpeg and ffprobe',
+  )
+  if (!ffmpegPath || !ffprobePath) return
+
+  const testDirectory = await mkdtemp(
+    path.join(os.tmpdir(), 'aurora-lightweight-preview-test-'),
+  )
+  const userDataPath = path.join(testDirectory, 'user-data')
+  const sourcePath = path.join(testDirectory, 'source.mp4')
+  const previousFfmpegPath = process.env.AURORA_FFMPEG_PATH
+  const previousFfprobePath = process.env.AURORA_FFPROBE_PATH
+  process.env.AURORA_FFMPEG_PATH = ffmpegPath
+  process.env.AURORA_FFPROBE_PATH = ffprobePath
+
+  try {
+    await execFile(ffmpegPath, [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'testsrc2=size=1280x720:rate=24:duration=2',
+      '-c:v',
+      'libx264',
+      '-pix_fmt',
+      'yuv420p',
+      sourcePath,
+    ])
+
+    const assetId = 'lightweight-card-detail-preview'
+    const progress: Array<{ kind: string; phase: string; progress: number }> = []
+    const pipeline = createMediaPipeline({
+      userDataPath,
+      onProgress: (entry) => progress.push(entry),
+    })
+    const generated = await pipeline.ensureMediaPreview({
+      assetId,
+      operationId: 'lightweight-preview-generate',
+      profile: 'lightweight',
+      sourcePath,
+    })
+
+    expect(generated).toMatchObject({
+      cached: false,
+      usesPreviewProxy: true,
+      version: 2,
+    })
+    expect(generated.playbackPath).not.toBe(sourcePath)
+    expect(generated.playbackPath).toContain(
+      `${path.sep}lightweight-preview${path.sep}v2${path.sep}`,
+    )
+    const { stdout: streamJson } = await execFile(ffprobePath, [
+      '-v',
+      'error',
+      '-select_streams',
+      'v:0',
+      '-show_entries',
+      'stream=codec_name,width,height,r_frame_rate,has_b_frames',
+      '-of',
+      'json',
+      generated.playbackPath,
+    ])
+    const stream = JSON.parse(streamJson).streams?.[0]
+    expect(stream).toMatchObject({
+      codec_name: 'h264',
+      width: 960,
+      height: 540,
+      r_frame_rate: '12/1',
+      has_b_frames: 0,
+    })
+    const { stdout: keyframeText } = await execFile(ffprobePath, [
+      '-v',
+      'error',
+      '-skip_frame',
+      'nokey',
+      '-select_streams',
+      'v:0',
+      '-show_entries',
+      'frame=best_effort_timestamp_time',
+      '-of',
+      'csv=p=0',
+      generated.playbackPath,
+    ])
+    expect(keyframeText.trim().split(/\r?\n/)).toHaveLength(4)
+    expect(
+      progress.some(
+        (entry) =>
+          entry.kind === 'lightweight-preview-proxy' &&
+          entry.phase === 'transcoding-preview',
+      ),
+    ).toBe(true)
+
+    const reused = await pipeline.ensureMediaPreview({
+      assetId,
+      operationId: 'lightweight-preview-reuse',
+      profile: 'lightweight',
+      sourcePath,
+    })
+    expect(reused).toMatchObject({
+      cached: true,
+      playbackPath: generated.playbackPath,
+      usesPreviewProxy: true,
+    })
   } finally {
     if (previousFfmpegPath == null) {
       delete process.env.AURORA_FFMPEG_PATH

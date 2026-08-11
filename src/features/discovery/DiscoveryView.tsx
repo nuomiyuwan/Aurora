@@ -135,6 +135,7 @@ const DISCOVERY_CARD_SWITCH_FALLBACK_MS = DISCOVERY_CARD_SWITCH_MS + 120
 const DISCOVERY_CARD_SWITCH_SAMPLE_COUNT = 24
 const DISCOVERY_LOCAL_DOUBLE_CLICK_MS = 460
 const DISCOVERY_LOCAL_DOUBLE_CLICK_DISTANCE = 28
+const DISCOVERY_RESULT_POINTER_DRAG_THRESHOLD = 6
 const DISCOVERY_SNAKE_STEP_MS = 520
 const DISCOVERY_SNAKE_STEP_FALLBACK_MS = DISCOVERY_SNAKE_STEP_MS + 80
 const DISCOVERY_SNAKE_STEP_SAMPLE_COUNT = 24
@@ -148,8 +149,8 @@ const DISCOVERY_CORRIDOR_CLICK_MAX_MS = 560
 const DISCOVERY_CORRIDOR_WHEEL_MIN_MS = 180
 const DISCOVERY_CORRIDOR_WHEEL_MAX_MS = 420
 const DISCOVERY_CORRIDOR_GUARD_DISTANCE = 0.5
-// The continuous wheel corridor remains hard-disabled. The authored nine-slot
-// baseline is only allowed to change through the approved click-to-front move.
+// Keep the resting rig on the authored nine-slot baseline. Trackpad and mouse
+// drag temporarily apply continuous corridor poses only while input is active.
 const DISCOVERY_RESULT_CORRIDOR_ENABLED = false
 // Changing this value remounts the result-card rig after a Fast Refresh. This
 // prevents a cancelled corridor frame from surviving as stale inline geometry.
@@ -182,6 +183,46 @@ const createOnlinePaginationState = () =>
       { ...EMPTY_ONLINE_PAGINATION },
     ]),
   ) as Record<OnlineMediaProvider, DiscoveryOnlinePaginationState>
+
+const ONLINE_SEARCH_STATUS_NON_ISSUE_PREFIXES = [
+  '正在',
+  '已找到',
+  '已加载',
+  '没有找到',
+] as const
+
+const isOnlineSearchStatusIssue = (status: string) =>
+  !ONLINE_SEARCH_STATUS_NON_ISSUE_PREFIXES.some((prefix) =>
+    status.startsWith(prefix),
+  )
+
+const formatMultiProviderOnlineSearchHint = ({
+  providerCount,
+  visibleResultCount,
+  isSearching,
+  loadingProviderCount,
+  issueProviderCount,
+  retryableProviderCount,
+}: {
+  providerCount: number
+  visibleResultCount: number
+  isSearching: boolean
+  loadingProviderCount: number
+  issueProviderCount: number
+  retryableProviderCount: number
+}) => {
+  if (isSearching) return `正在搜索 ${providerCount} 个在线来源…`
+
+  const summary = `在线结果 ${visibleResultCount} 条 · ${providerCount} 个来源`
+  if (retryableProviderCount > 0) {
+    return `${summary} · ${retryableProviderCount} 个需重试`
+  }
+  if (issueProviderCount > 0) {
+    return `${summary} · ${issueProviderCount} 个异常`
+  }
+  if (loadingProviderCount > 0) return `${summary} · 正在加载更多…`
+  return summary
+}
 
 const renderDiscoveryActionIcon = (
   icon: DiscoveryResultActionIcon,
@@ -1300,6 +1341,7 @@ export function DiscoveryView({
     useState<DiscoverySnakeTransition | null>(null)
   const [corridorWindowStart, setCorridorWindowStart] = useState(0)
   const [isCorridorMoving, setIsCorridorMoving] = useState(false)
+  const [isResultPointerDragging, setIsResultPointerDragging] = useState(false)
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [isSearching, setIsSearching] = useState(false)
   const [aiSearchError, setAiSearchError] = useState<string | null>(null)
@@ -1364,6 +1406,18 @@ export function DiscoveryView({
   } | null>(null)
   const localDoubleClickResetTimerRef = useRef<number | null>(null)
   const suppressNextResultClickRef = useRef(false)
+  const resultPointerClickResetTimerRef = useRef<number | null>(null)
+  const resultPointerDragRef = useRef({
+    active: false,
+    dragging: false,
+    pointerId: -1,
+    axis: null as WheelDragAxis | null,
+    startX: 0,
+    startY: 0,
+    lastX: 0,
+    lastY: 0,
+    lastTime: 0,
+  })
   const spatialOrderIdsRef = useRef<string[]>([])
   const snakeAnimationsRef = useRef<Animation[]>([])
   const snakeFallbackTimerRef = useRef<number | null>(null)
@@ -1383,6 +1437,7 @@ export function DiscoveryView({
     (direction: DiscoverySnakeDirection) => void
   >(() => undefined)
   const consumePendingSnakeStepRef = useRef<() => void>(() => undefined)
+  const discoveryViewRef = useRef<HTMLElement>(null)
   const corridorCardsRef = useRef<HTMLDivElement>(null)
   const corridorPositionRef = useRef(0)
   const corridorWindowStartRef = useRef(0)
@@ -1828,6 +1883,52 @@ export function DiscoveryView({
     typeSummary,
     RESOLUTION_LABELS[resolutionFilter],
   ].filter(Boolean).join(' · ')
+  const retryableOnlineProviders = enabledProviderList.filter((provider) => {
+    const pagination = onlinePaginationByProvider[provider]
+    return (
+      shouldRunDirectOnlineSearch(sourceFilter, provider) &&
+      pagination.autoLoadBlocked &&
+      Boolean(pagination.loadMoreError)
+    )
+  })
+  const onlineStatusProviders = enabledProviderList.filter(
+    (provider) =>
+      shouldRunDirectOnlineSearch(sourceFilter, provider) &&
+      Boolean(onlineSearchStatuses[provider]),
+  )
+  const visibleOnlineResultCount = filteredResults.filter(
+    (result) =>
+      isOnlineMediaProvider(result.source) &&
+      onlineStatusProviders.includes(result.source),
+  ).length
+  const loadingOnlineProviderCount = onlineStatusProviders.filter(
+    (provider) => onlinePaginationByProvider[provider].loading,
+  ).length
+  const issueOnlineProviderCount = onlineStatusProviders.filter((provider) => {
+    const status = onlineSearchStatuses[provider]
+    return Boolean(
+      onlinePaginationByProvider[provider].loadMoreError ||
+      (status && isOnlineSearchStatusIssue(status)),
+    )
+  }).length
+  const compactOnlineSearchHint =
+    !aiSearchMode &&
+    sourceFilter === 'all' &&
+    onlineStatusProviders.length > 1
+      ? formatMultiProviderOnlineSearchHint({
+          providerCount: onlineStatusProviders.length,
+          visibleResultCount: visibleOnlineResultCount,
+          isSearching,
+          loadingProviderCount: loadingOnlineProviderCount,
+          issueProviderCount: issueOnlineProviderCount,
+          retryableProviderCount: retryableOnlineProviders.length,
+        })
+      : null
+  const onlineSearchStatusDetail = onlineStatusProviders
+    .map((provider) =>
+      `${getOnlineProviderLabel(provider)}：${onlineSearchStatuses[provider]}`,
+    )
+    .join(' · ')
   const discoverySearchHint = aiSearchMode
     ? aiSearchError
       ? `AI 搜索暂不可用：${aiSearchError}`
@@ -1836,6 +1937,8 @@ export function DiscoveryView({
           ? `AI 可搜索 ${aiCoverage.searchableLocalVideos} / ${aiCoverage.totalLocalVideos} 个本地视频 · 预览图 ${aiCoverage.thumbnailVideos} 个视频 · 关键帧索引 ${aiCoverage.visualIndexVideos} 个视频`
           : 'AI 将理解视频预览图与视觉索引中的关键帧'
         : '请先在探索页设置中配置 AI 在线模型'
+    : compactOnlineSearchHint
+      ? compactOnlineSearchHint
     : isOnlineMediaProvider(sourceFilter) && onlineSearchStatuses[sourceFilter]
       ? onlineSearchStatuses[sourceFilter]
     : sourceFilter === 'all' &&
@@ -1851,14 +1954,9 @@ export function DiscoveryView({
         : discoverySearch.connection === 'unavailable'
           ? 'Emby 未连接；当前仅搜索 Aurora 中的真实本地素材'
           : '当前搜索 Aurora 中的真实本地素材；可在设置中连接 Emby'
-  const retryableOnlineProviders = enabledProviderList.filter((provider) => {
-    const pagination = onlinePaginationByProvider[provider]
-    return (
-      shouldRunDirectOnlineSearch(sourceFilter, provider) &&
-      pagination.autoLoadBlocked &&
-      Boolean(pagination.loadMoreError)
-    )
-  })
+  const discoverySearchHintDetail = compactOnlineSearchHint
+    ? onlineSearchStatusDetail
+    : discoverySearchHint
   const retryBlockedOnlineSearches = () => {
     retryableOnlineProviders.forEach((provider) => {
       loadMoreOnlineResultsRef.current(provider, 'manual')
@@ -1900,6 +1998,12 @@ export function DiscoveryView({
       if (hoverExitTimerRef.current !== null) {
         window.clearTimeout(hoverExitTimerRef.current)
       }
+      if (resultPointerClickResetTimerRef.current !== null) {
+        window.clearTimeout(resultPointerClickResetTimerRef.current)
+      }
+      resultPointerDragRef.current.active = false
+      resultPointerDragRef.current.dragging = false
+      resultPointerDragRef.current.axis = null
       if (corridorWheelReleaseTimerRef.current !== null) {
         window.clearTimeout(corridorWheelReleaseTimerRef.current)
       }
@@ -2002,9 +2106,30 @@ export function DiscoveryView({
       window.cancelAnimationFrame(corridorSettleRafRef.current)
       corridorSettleRafRef.current = null
     }
+    const pointerState = resultPointerDragRef.current
+    if (pointerState.dragging) suppressNextResultClickRef.current = false
+    if (pointerState.active && pointerState.pointerId >= 0) {
+      const view = discoveryViewRef.current
+      try {
+        if (view?.hasPointerCapture(pointerState.pointerId)) {
+          view.releasePointerCapture(pointerState.pointerId)
+        }
+      } catch {
+        // Pointer capture may already have been released by the browser.
+      }
+    }
+    if (resultPointerClickResetTimerRef.current !== null) {
+      window.clearTimeout(resultPointerClickResetTimerRef.current)
+      resultPointerClickResetTimerRef.current = null
+    }
     corridorWheelStateRef.current.active = false
     corridorWheelStateRef.current.axis = null
     corridorWheelStateRef.current.hasVelocity = false
+    pointerState.active = false
+    pointerState.dragging = false
+    pointerState.pointerId = -1
+    pointerState.axis = null
+    setIsResultPointerDragging(false)
     const orderedIds = spatialOrderIdsRef.current
     const maximumWindowStart = Math.max(
       0,
@@ -2763,6 +2888,32 @@ export function DiscoveryView({
     setHoveredId(null)
   }
 
+  const resetResultPointerDrag = () => {
+    const pointerState = resultPointerDragRef.current
+    const wasDragging = pointerState.dragging
+    const pointerId = pointerState.pointerId
+    const view = discoveryViewRef.current
+    if (pointerState.active && pointerId >= 0 && view) {
+      try {
+        if (view.hasPointerCapture(pointerId)) {
+          view.releasePointerCapture(pointerId)
+        }
+      } catch {
+        // Pointer capture may already have been released by the browser.
+      }
+    }
+    pointerState.active = false
+    pointerState.dragging = false
+    pointerState.pointerId = -1
+    pointerState.axis = null
+    setIsResultPointerDragging(false)
+    if (resultPointerClickResetTimerRef.current !== null) {
+      window.clearTimeout(resultPointerClickResetTimerRef.current)
+      resultPointerClickResetTimerRef.current = null
+    }
+    if (wasDragging) suppressNextResultClickRef.current = false
+  }
+
   const applyCorridorPosition = (position: number) => {
     const orderedIds = spatialOrderIdsRef.current
     const maximumPosition = Math.max(
@@ -2952,6 +3103,7 @@ export function DiscoveryView({
   ])
 
   const resetCorridorForContextChange = () => {
+    resetResultPointerDrag()
     finishSelectionBeforeContextChange()
     cancelCorridorAnimation()
     snakeSequenceRef.current += 1
@@ -4367,33 +4519,246 @@ export function DiscoveryView({
     if (event.pointerType !== 'mouse' || event.button !== 0) return
 
     const pending = localDoubleClickRef.current
-    if (!pending) return
-
-    const elapsed = event.timeStamp - pending.timeStamp
-    const distance = Math.hypot(
-      event.clientX - pending.clientX,
-      event.clientY - pending.clientY,
-    )
-    if (
-      elapsed > 0 &&
-      elapsed <= DISCOVERY_LOCAL_DOUBLE_CLICK_MS &&
-      distance <= DISCOVERY_LOCAL_DOUBLE_CLICK_DISTANCE
-    ) {
-      const result = resultById.get(pending.resultId) ?? null
-      clearLocalDoubleClickBridge()
-      event.preventDefault()
-      event.stopPropagation()
-      if (handleOpenPrimaryResult(result)) {
-        suppressNextResultClickRef.current = true
-        localDoubleClickResetTimerRef.current = window.setTimeout(() => {
-          suppressNextResultClickRef.current = false
-          localDoubleClickResetTimerRef.current = null
-        }, DISCOVERY_LOCAL_DOUBLE_CLICK_MS)
+    if (pending) {
+      const elapsed = event.timeStamp - pending.timeStamp
+      const distance = Math.hypot(
+        event.clientX - pending.clientX,
+        event.clientY - pending.clientY,
+      )
+      if (
+        elapsed > 0 &&
+        elapsed <= DISCOVERY_LOCAL_DOUBLE_CLICK_MS &&
+        distance <= DISCOVERY_LOCAL_DOUBLE_CLICK_DISTANCE
+      ) {
+        const result = resultById.get(pending.resultId) ?? null
+        clearLocalDoubleClickBridge()
+        event.preventDefault()
+        event.stopPropagation()
+        if (handleOpenPrimaryResult(result)) {
+          suppressNextResultClickRef.current = true
+          localDoubleClickResetTimerRef.current = window.setTimeout(() => {
+            suppressNextResultClickRef.current = false
+            localDoubleClickResetTimerRef.current = null
+          }, DISCOVERY_LOCAL_DOUBLE_CLICK_MS)
+        }
+        return
       }
+
+      clearLocalDoubleClickBridge()
+    }
+
+    const hitTarget =
+      event.target instanceof Element
+        ? event.target.closest<HTMLButtonElement>('.discoveryResultHit')
+        : null
+    if (
+      !hitTarget ||
+      hitTarget.disabled ||
+      spatialOrderIdsRef.current.length <= CARD_SLOTS.length ||
+      isSearching ||
+      isCameraDragging ||
+      isCorridorMoving ||
+      snakeLockRef.current ||
+      snakeTransition !== null ||
+      selectionLockRef.current ||
+      selectionTransition !== null ||
+      !active ||
+      suspended
+    ) {
       return
     }
 
-    clearLocalDoubleClickBridge()
+    const now = performance.now()
+    resultPointerDragRef.current = {
+      active: true,
+      dragging: false,
+      pointerId: event.pointerId,
+      axis: null,
+      startX: event.clientX,
+      startY: event.clientY,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      lastTime: now,
+    }
+  }
+
+  const handleResultStagePointerMoveCapture = (
+    event: ReactPointerEvent<HTMLElement>,
+  ) => {
+    const pointerState = resultPointerDragRef.current
+    if (
+      !pointerState.active ||
+      pointerState.pointerId !== event.pointerId
+    ) {
+      return
+    }
+
+    if (!pointerState.dragging) {
+      const deltaX = event.clientX - pointerState.startX
+      const deltaY = event.clientY - pointerState.startY
+      if (
+        Math.hypot(deltaX, deltaY) <
+        DISCOVERY_RESULT_POINTER_DRAG_THRESHOLD
+      ) {
+        return
+      }
+      if (
+        spatialOrderIdsRef.current.length <= CARD_SLOTS.length ||
+        isSearching ||
+        isCameraDragging ||
+        snakeLockRef.current ||
+        snakeTransition !== null ||
+        selectionLockRef.current ||
+        selectionTransition !== null ||
+        !active ||
+        suspended
+      ) {
+        resetResultPointerDrag()
+        return
+      }
+
+      pointerState.dragging = true
+      pointerState.axis = Math.abs(deltaX) >= Math.abs(deltaY) ? 'x' : 'y'
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId)
+      } catch {
+        // The section can still finish the gesture while the pointer stays inside.
+      }
+      clearLocalDoubleClickBridge()
+      suppressNextResultClickRef.current = true
+      if (resultPointerClickResetTimerRef.current !== null) {
+        window.clearTimeout(resultPointerClickResetTimerRef.current)
+        resultPointerClickResetTimerRef.current = null
+      }
+      if (corridorWheelReleaseTimerRef.current !== null) {
+        window.clearTimeout(corridorWheelReleaseTimerRef.current)
+        corridorWheelReleaseTimerRef.current = null
+      }
+      cancelCorridorAnimation()
+      if (corridorSettleRafRef.current !== null) {
+        window.cancelAnimationFrame(corridorSettleRafRef.current)
+        corridorSettleRafRef.current = null
+      }
+
+      const wheelState = corridorWheelStateRef.current
+      wheelState.active = true
+      wheelState.axis = pointerState.axis
+      wheelState.snapAnchor = Math.round(corridorPositionRef.current)
+      wheelState.rawPosition = corridorPositionRef.current
+      wheelState.previewStartPosition = corridorPositionRef.current
+      wheelState.snapTarget = wheelState.snapAnchor
+      wheelState.lastTime = pointerState.lastTime
+      wheelState.velocity = 0
+      wheelState.hasVelocity = false
+      pendingSnakeStepsRef.current = 0
+      snakeWheelStateRef.current.accumulator = 0
+      setIsResultPointerDragging(true)
+      setCorridorMotionActive(true)
+      stopPreviewAndClearStatus()
+    }
+
+    const axis = pointerState.axis
+    if (!axis) return
+    const now = performance.now()
+    const elapsed = Math.max(8, now - pointerState.lastTime)
+    const pointerDelta = axis === 'x'
+      ? event.clientX - pointerState.lastX
+      : event.clientY - pointerState.lastY
+    const positionDelta =
+      -pointerDelta / DISCOVERY_SNAKE_WHEEL_THRESHOLD
+    pointerState.lastX = event.clientX
+    pointerState.lastY = event.clientY
+    pointerState.lastTime = now
+
+    const wheelState = corridorWheelStateRef.current
+    const maximumPosition = Math.max(
+      0,
+      spatialOrderIdsRef.current.length - CARD_SLOTS.length,
+    )
+    const previousRawPosition = wheelState.rawPosition
+    wheelState.rawPosition = Math.max(
+      0,
+      Math.min(
+        maximumPosition,
+        wheelState.rawPosition + positionDelta,
+      ),
+    )
+    if (wheelState.rawPosition === previousRawPosition) {
+      wheelState.velocity = 0
+      wheelState.hasVelocity = false
+    } else {
+      const instantVelocity = positionDelta / elapsed
+      wheelState.velocity = wheelState.hasVelocity
+        ? wheelState.velocity * 0.68 + instantVelocity * 0.32
+        : instantVelocity
+      wheelState.hasVelocity = true
+    }
+    wheelState.lastTime = now
+    const visualPosition =
+      wheelState.rawPosition === previousRawPosition
+        ? wheelState.rawPosition
+        : Math.max(
+            0,
+            Math.min(
+              maximumPosition,
+              corridorPositionRef.current + positionDelta,
+            ),
+          )
+    wheelState.previewStartPosition = visualPosition
+    wheelState.snapTarget = resolveTrackpadSnapTarget(
+      wheelState.snapAnchor,
+      wheelState.rawPosition,
+      0,
+      maximumPosition,
+    )
+    scheduleCorridorPosition(visualPosition)
+    event.preventDefault()
+    event.stopPropagation()
+  }
+
+  const finishResultStagePointerDrag = (
+    event: ReactPointerEvent<HTMLElement>,
+    shouldCommit: boolean,
+  ) => {
+    const pointerState = resultPointerDragRef.current
+    if (
+      !pointerState.active ||
+      pointerState.pointerId !== event.pointerId
+    ) {
+      return
+    }
+
+    const wasDragging = pointerState.dragging
+    pointerState.active = false
+    pointerState.dragging = false
+    pointerState.pointerId = -1
+    pointerState.axis = null
+    if (!wasDragging) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId)
+      }
+    } catch {
+      // Pointer capture may already have been released by the browser.
+    }
+    setIsResultPointerDragging(false)
+    const wheelState = corridorWheelStateRef.current
+    if (!shouldCommit) {
+      wheelState.snapTarget = wheelState.snapAnchor
+      wheelState.velocity = 0
+      wheelState.hasVelocity = false
+    }
+    finishCorridorWheel()
+    if (resultPointerClickResetTimerRef.current !== null) {
+      window.clearTimeout(resultPointerClickResetTimerRef.current)
+    }
+    resultPointerClickResetTimerRef.current = window.setTimeout(() => {
+      suppressNextResultClickRef.current = false
+      resultPointerClickResetTimerRef.current = null
+    }, 0)
   }
 
   const armLocalDoubleClickBridge = (
@@ -4432,9 +4797,15 @@ export function DiscoveryView({
     return () => {
       localDoubleClickRef.current = null
       suppressNextResultClickRef.current = false
+      resultPointerDragRef.current.active = false
+      resultPointerDragRef.current.dragging = false
       if (localDoubleClickResetTimerRef.current !== null) {
         window.clearTimeout(localDoubleClickResetTimerRef.current)
         localDoubleClickResetTimerRef.current = null
+      }
+      if (resultPointerClickResetTimerRef.current !== null) {
+        window.clearTimeout(resultPointerClickResetTimerRef.current)
+        resultPointerClickResetTimerRef.current = null
       }
     }
   }, [])
@@ -4614,13 +4985,26 @@ export function DiscoveryView({
         </div>
 
         <p
-          className="discoverySearchHint"
+          className={`discoverySearchHint${
+            compactOnlineSearchHint ? ' isCompact' : ''
+          }`}
           data-page-grade="true"
           role={retryableOnlineProviders.length > 0 ? 'button' : undefined}
           tabIndex={retryableOnlineProviders.length > 0 ? 0 : undefined}
           aria-label={
-            retryableOnlineProviders.length > 0
-              ? discoverySearchHint
+            compactOnlineSearchHint
+              ? `${discoverySearchHintDetail}${
+                  retryableOnlineProviders.length > 0
+                    ? '。点击重试异常来源'
+                    : ''
+                }`
+              : retryableOnlineProviders.length > 0
+                ? discoverySearchHint
+                : undefined
+          }
+          title={
+            compactOnlineSearchHint
+              ? discoverySearchHintDetail
               : undefined
           }
           style={
@@ -4645,7 +5029,9 @@ export function DiscoveryView({
           }}
         >
           <Info size={12} strokeWidth={1.55} aria-hidden="true" />
-          {discoverySearchHint}
+          <span className="discoverySearchHintText">
+            {discoverySearchHint}
+          </span>
         </p>
       </section>
       <DiscoveryReflectionCanvas
@@ -4736,12 +5122,29 @@ export function DiscoveryView({
         <span className="discoveryDetailProjectedGlass" />
       </div>
       <section
-        className="discoveryView"
+        ref={discoveryViewRef}
+        className={`discoveryView${
+          isResultPointerDragging ? ' isResultPointerDragging' : ''
+        }`}
         aria-label="探索页"
         aria-hidden={!active}
         data-page-active={active}
+        data-result-pointer-drag-enabled={
+          active &&
+          !suspended &&
+          showResults &&
+          !isSearching &&
+          spatialOrderIds.length > CARD_SLOTS.length
+        }
         inert={!active}
         onPointerDownCapture={handleResultStagePointerDownCapture}
+        onPointerMoveCapture={handleResultStagePointerMoveCapture}
+        onPointerUpCapture={(event) =>
+          finishResultStagePointerDrag(event, true)
+        }
+        onPointerCancelCapture={(event) =>
+          finishResultStagePointerDrag(event, false)
+        }
         onWheelCapture={handleDiscoveryResultWheel}
       >
         <div className="discoveryPlane">

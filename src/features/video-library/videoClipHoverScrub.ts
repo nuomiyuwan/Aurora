@@ -58,6 +58,32 @@ export function resolveVideoClipHoverTime(
   return clampUnit(progress) * durationSeconds
 }
 
+export function resolveVideoClipHoverSeekTime(
+  progress: number,
+  durationSeconds: number,
+  previewFps = 12,
+) {
+  const rawTarget = resolveVideoClipHoverTime(progress, durationSeconds)
+  if (rawTarget === null) return null
+  const normalizedFps =
+    Number.isFinite(previewFps) && previewFps > 0 ? previewFps : 12
+  const seekStep = 1 / normalizedFps
+  const endGuard = Math.min(seekStep, durationSeconds * 0.02)
+  const maximumTime = Math.max(0, durationSeconds - endGuard)
+  const boundedTarget = Math.min(rawTarget, maximumTime)
+  return Math.min(
+    Math.round(boundedTarget / seekStep) * seekStep,
+    maximumTime,
+  )
+}
+
+export function resolveVideoClipHoverPlaybackSource(
+  lightweightSourceUrl: string | null,
+  immediateSourceUrl: string | null,
+) {
+  return lightweightSourceUrl ?? immediateSourceUrl
+}
+
 export function resolveVideoClipHoverFrameIndex(
   progress: number,
   frameTimes: readonly number[],
