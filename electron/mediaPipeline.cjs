@@ -11,6 +11,10 @@ const {
 const INDEX_VERSION = 4
 const INDEX_TIMESTAMP_MODE = 'ffmpeg-input-pts-v1'
 const PREVIEW_PROXY_VERSION = 1
+const LIGHTWEIGHT_PREVIEW_PROXY_VERSION = 2
+const LIGHTWEIGHT_PREVIEW_MAX_EDGE = 960
+const LIGHTWEIGHT_PREVIEW_FPS = 12
+const LIGHTWEIGHT_PREVIEW_GOP_FRAMES = 6
 const MEDIA_THUMBNAIL_VERSION = 1
 const MEDIA_THUMBNAIL_MAX_WIDTH = 960
 const MEDIA_THUMBNAIL_SAMPLE_FRAMES = 24
@@ -876,12 +880,49 @@ function createPreviewProxyArgs(sourcePath, destinationPath) {
   ]
 }
 
+function createLightweightPreviewProxyArgs(sourcePath, destinationPath) {
+  return [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-y',
+    '-i',
+    sourcePath,
+    '-map',
+    '0:v:0',
+    '-an',
+    '-vf',
+    [
+      `scale='trunc(min(${LIGHTWEIGHT_PREVIEW_MAX_EDGE},iw)/2)*2':-2`,
+      `fps=${LIGHTWEIGHT_PREVIEW_FPS}`,
+    ].join(','),
+    ...h264CodecArguments(30, { realtime: true, profile: 'main' }),
+    '-g',
+    String(LIGHTWEIGHT_PREVIEW_GOP_FRAMES),
+    '-keyint_min',
+    String(LIGHTWEIGHT_PREVIEW_GOP_FRAMES),
+    '-bf',
+    '0',
+    '-movflags',
+    '+faststart',
+    '-fps_mode:v',
+    'cfr',
+    '-progress',
+    'pipe:1',
+    '-nostats',
+    destinationPath,
+  ]
+}
+
 async function readReusablePreviewManifest(
   targetDirectory,
   assetId,
   sourcePath,
   metadata,
+  options = {},
 ) {
+  const version = options.version ?? PREVIEW_PROXY_VERSION
+  const profile = options.profile ?? 'playback'
   try {
     const manifest = JSON.parse(
       await fs.promises.readFile(
@@ -891,7 +932,10 @@ async function readReusablePreviewManifest(
     )
     const previewPath = path.join(targetDirectory, 'preview.mp4')
     if (
-      manifest?.version !== PREVIEW_PROXY_VERSION ||
+      manifest?.version !== version ||
+      (profile === 'lightweight'
+        ? manifest?.profile !== 'lightweight'
+        : manifest?.profile != null && manifest.profile !== 'playback') ||
       manifest?.assetId !== assetId ||
       manifest?.sourcePath !== sourcePath ||
       manifest?.metadata?.sizeBytes !== metadata.sizeBytes ||
@@ -1063,7 +1107,7 @@ function h264CodecArguments(quality, options = {}) {
       '-q:v',
       videotoolboxQuality(quality, 18),
       '-profile:v',
-      'high',
+      options.profile ?? 'high',
       '-pix_fmt',
       'yuv420p',
     ]
@@ -1077,6 +1121,7 @@ function h264CodecArguments(quality, options = {}) {
     options.realtime ? 'veryfast' : 'medium',
     '-crf',
     String(quality ?? 18),
+    ...(options.profile ? ['-profile:v', options.profile] : []),
     '-pix_fmt',
     'yuv420p',
   ]
@@ -1469,18 +1514,25 @@ function createMediaPipeline({ userDataPath, onProgress }) {
     const assetId = validateAssetId(request?.assetId)
     const { filePath: sourcePath } =
       await validateMediaFilePath(request?.sourcePath)
+    const profile = request?.profile === 'lightweight'
+      ? 'lightweight'
+      : 'playback'
+    const isLightweightPreview = profile === 'lightweight'
+    const previewVersion = isLightweightPreview
+      ? LIGHTWEIGHT_PREVIEW_PROXY_VERSION
+      : PREVIEW_PROXY_VERSION
     const targetDirectory = path.join(
       userDataPath,
       'media',
       mediaDirectoryHash(assetId),
-      'preview',
-      `v${PREVIEW_PROXY_VERSION}`,
+      isLightweightPreview ? 'lightweight-preview' : 'preview',
+      `v${previewVersion}`,
     )
     const runningTask = previewTasks.get(targetDirectory)
     if (runningTask) return runningTask
 
     const task = withOperation(
-      'preview-proxy',
+      isLightweightPreview ? 'lightweight-preview-proxy' : 'preview-proxy',
       request,
       { assetId, sourcePath },
       async (operation) => {
@@ -1510,6 +1562,7 @@ function createMediaPipeline({ userDataPath, onProgress }) {
             assetId,
             sourcePath,
             metadata,
+            { version: previewVersion, profile },
           )
           if (reusable) {
             operation.report({
@@ -1526,7 +1579,11 @@ function createMediaPipeline({ userDataPath, onProgress }) {
           }
         }
 
-        if (!request?.forceProxy && !requiresPreviewProxy(metadata)) {
+        if (
+          !isLightweightPreview &&
+          !request?.forceProxy &&
+          !requiresPreviewProxy(metadata)
+        ) {
           operation.report({
             phase: 'complete',
             progress: 1,
@@ -1534,7 +1591,7 @@ function createMediaPipeline({ userDataPath, onProgress }) {
             totalSeconds: metadata.durationSeconds,
           })
           return {
-            version: PREVIEW_PROXY_VERSION,
+            version: previewVersion,
             assetId,
             sourcePath,
             previewPath: null,
@@ -1555,7 +1612,9 @@ function createMediaPipeline({ userDataPath, onProgress }) {
 
         try {
           await runSpawnedFfmpeg(
-            createPreviewProxyArgs(sourcePath, tempPreviewPath),
+            isLightweightPreview
+              ? createLightweightPreviewProxyArgs(sourcePath, tempPreviewPath)
+              : createPreviewProxyArgs(sourcePath, tempPreviewPath),
             operation,
             {
               durationSeconds: metadata.durationSeconds,
@@ -1580,7 +1639,8 @@ function createMediaPipeline({ userDataPath, onProgress }) {
           }
 
           const manifest = {
-            version: PREVIEW_PROXY_VERSION,
+            version: previewVersion,
+            ...(isLightweightPreview ? { profile: 'lightweight' } : {}),
             assetId,
             sourcePath,
             previewPath,

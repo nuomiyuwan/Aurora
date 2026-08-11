@@ -26,6 +26,27 @@ export function WindowsWindowControls() {
     }
   }, [bridge])
 
+  useEffect(() => {
+    if (bridge?.platform !== 'win32' || !fullscreen) return
+    const handleFullscreenEscape = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        document.fullscreenElement
+      ) {
+        return
+      }
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      void bridge.toggleFullscreenWindow().then(setFullscreen)
+    }
+    window.addEventListener('keydown', handleFullscreenEscape, true)
+    return () =>
+      window.removeEventListener('keydown', handleFullscreenEscape, true)
+  }, [bridge, fullscreen])
+
   const expanded = maximized || fullscreen
 
   if (bridge?.platform !== 'win32') return null
@@ -65,10 +86,20 @@ export function WindowsWindowControls() {
           <button
             className="windowsWindowControl windowsWindowControlMaximize"
             type="button"
-            aria-label={maximized ? '还原窗口' : '最大化窗口'}
-            data-maximized={maximized || undefined}
+            aria-label={
+              fullscreen
+                ? '退出全屏'
+                : maximized
+                  ? '还原窗口'
+                  : '进入全屏'
+            }
+            data-maximized={expanded || undefined}
             onClick={() => {
-              void bridge.toggleMaximizeWindow().then(setMaximized)
+              if (maximized && !fullscreen) {
+                void bridge.toggleMaximizeWindow().then(setMaximized)
+                return
+              }
+              void bridge.toggleFullscreenWindow().then(setFullscreen)
             }}
           />
         </div>

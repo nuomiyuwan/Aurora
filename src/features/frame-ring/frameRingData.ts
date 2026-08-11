@@ -1,4 +1,5 @@
 import type { ResolvedFrameRingLayout } from './frameRingLayout'
+import type { MediaColorPresetId } from '../../data/mediaColorPresets'
 
 export interface FrameRingClipSource {
   id: string
@@ -21,6 +22,7 @@ export interface FrameRingClipSource {
   capturedAt: string
   tags: string[]
   note: string
+  colorPreset?: MediaColorPresetId
 }
 
 export interface FrameRingIndexedFrame {

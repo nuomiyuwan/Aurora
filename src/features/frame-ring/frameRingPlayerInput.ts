@@ -4,6 +4,7 @@ import {
 } from '../wheelDragGesture'
 
 export const LOCAL_PLAYER_KEYBOARD_SEEK_SECONDS = 5
+export const LOCAL_PLAYER_KEYBOARD_VOLUME_STEP = 0.05
 
 const MINIMUM_TRACKPAD_SECONDS_PER_PIXEL = 0.02
 const MAXIMUM_TRACKPAD_SECONDS_PER_PIXEL = 0.5
@@ -18,6 +19,10 @@ export function clampLocalPlayerTime(
   const start = Math.min(startSeconds, endSeconds)
   const end = Math.max(startSeconds, endSeconds)
   return Math.min(end, Math.max(start, timeSeconds))
+}
+
+export function clampLocalPlayerVolume(volume: number) {
+  return Math.min(1, Math.max(0, volume))
 }
 
 export function resolveLocalPlayerTrackpadSeekDelta(

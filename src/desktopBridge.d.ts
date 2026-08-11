@@ -423,6 +423,7 @@ declare global {
   type MediaOperationKind =
     | 'media-thumbnail'
     | 'preview-proxy'
+    | 'lightweight-preview-proxy'
     | 'visual-index'
     | 'still-export'
     | 'clip-export'
@@ -458,6 +459,7 @@ declare global {
   interface MediaPreviewRequest {
     assetId: string
     sourcePath: string
+    profile?: 'playback' | 'lightweight'
     forceProxy?: boolean
     rebuild?: boolean
     operationId?: string
@@ -902,6 +904,7 @@ declare global {
     ): () => void
     minimizeWindow(): void
     toggleMaximizeWindow(): Promise<boolean>
+    toggleFullscreenWindow(): Promise<boolean>
     getWindowMaximizedState(): Promise<boolean>
     onWindowMaximizedStateChange(
       listener: (maximized: boolean) => void,

@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef } from 'react'
-import { createPortal } from 'react-dom'
 import { Download, RefreshCw, Sparkles, X } from 'lucide-react'
 import './AppUpdatePrompt.css'
 
@@ -69,9 +68,9 @@ export function AppUpdatePrompt({
     ? state.releaseNotes
     : ['本次更新未提供详细说明。']
 
-  return createPortal(
+  return (
     <div
-      className="appUpdateOverlay"
+      className="overlay appUpdateOverlay"
       role="presentation"
       data-busy={busy || undefined}
       onPointerDown={(event) => {
@@ -80,7 +79,7 @@ export function AppUpdatePrompt({
       }}
     >
       <section
-        className="appUpdatePrompt"
+        className="createPanel uiGlassShell appUpdatePrompt"
         role="dialog"
         aria-modal="true"
         aria-labelledby="app-update-title"
@@ -88,7 +87,7 @@ export function AppUpdatePrompt({
         onPointerDown={(event) => event.stopPropagation()}
       >
         <button
-          className="appUpdateClose"
+          className="panelClose uiGlassInteractive appUpdateClose"
           type="button"
           aria-label="稍后更新"
           disabled={busy}
@@ -108,7 +107,7 @@ export function AppUpdatePrompt({
           </p>
         </header>
 
-        <div className="appUpdateVersions" aria-label="版本变化">
+        <div className="appUpdateVersions uiGlassInset" aria-label="版本变化">
           <span>
             <small>当前版本</small>
             <strong>v{state.currentVersion}</strong>
@@ -156,7 +155,7 @@ export function AppUpdatePrompt({
         <footer className="appUpdateActions">
           <button
             type="button"
-            className="appUpdateLater"
+            className="appUpdateLater uiGlassInset uiGlassInteractive"
             disabled={busy}
             onClick={onClose}
           >
@@ -165,7 +164,7 @@ export function AppUpdatePrompt({
           <button
             ref={updateButtonRef}
             type="button"
-            className="appUpdatePrimary"
+            className="appUpdatePrimary uiGlassInset uiGlassInteractive active"
             disabled={busy}
             onClick={onUpdate}
           >
@@ -178,7 +177,6 @@ export function AppUpdatePrompt({
           </button>
         </footer>
       </section>
-    </div>,
-    document.body,
+    </div>
   )
 }

@@ -29,6 +29,7 @@ import { isOnlineMediaProvider } from './onlineProviderRegistry'
  * before actual source-frame PTS were stored must be rebuilt.
  */
 import type { Project } from './projects'
+import { normalizeMediaColorPresetId } from './mediaColorPresets'
 
 export const LIBRARY_SCHEMA_VERSION = 5
 
@@ -565,6 +566,7 @@ function parseMediaAsset(
   const canonicalFps = readNullableFiniteNumber(value.fpsValue)
   const canonicalSizeBytes = readNullableFiniteNumber(value.sizeBytes)
   const indexError = readNullableString(value.indexError)
+  const colorPreset = normalizeMediaColorPresetId(value.colorPreset)
   const online =
     fromSchemaVersion >= 4 && value.online !== undefined
       ? parseOnlineMediaDescriptor(value.online)
@@ -654,6 +656,7 @@ function parseMediaAsset(
       canonicalSizeBytes ??
       (fromSchemaVersion === 1 ? parseLegacySizeBytes(size) : null),
     indexError: indexError ?? null,
+    ...(colorPreset !== 'original' && !online ? { colorPreset } : {}),
     ...(online ? { online } : {}),
   }
 }
@@ -970,10 +973,18 @@ export function serializePersistentLibrary(
       videoCount: projectAssetCounts.get(project.id) ?? 0,
       cover: portableAssetUrl(project.cover) ?? project.cover,
     })),
-    mediaAssets: state.mediaAssets.map((asset) => ({
-      ...asset,
-      thumbnail: portableAssetUrl(asset.thumbnail),
-    })),
+    mediaAssets: state.mediaAssets.map(
+      ({ colorPreset: rawColorPreset, ...asset }) => {
+        const colorPreset = normalizeMediaColorPresetId(rawColorPreset)
+        return {
+          ...asset,
+          thumbnail: portableAssetUrl(asset.thumbnail),
+          ...(colorPreset !== 'original' && !asset.online
+            ? { colorPreset }
+            : {}),
+        }
+      },
+    ),
     projectAssetRefs: state.projectAssetRefs,
     // Visual-index files live inside Aurora's managed application-data
     // directory. Keep their absolute paths intact so Electron can read them

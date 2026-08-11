@@ -42,6 +42,7 @@ const { createParticleAssetManager } = require('./particleAssets.cjs')
 const { createVisualAssetStore } = require('./visualAssets.cjs')
 const { createModelAssetManager } = require('./modelAssets.cjs')
 const { createWindowRevealGate } = require('./windowRevealGate.cjs')
+const { toggleWindowFullscreen } = require('./windowControls.cjs')
 const { createExternalVideoOpenBroker } = require('./externalVideoOpen.cjs')
 const { createAppUpdateManager } = require('./appUpdater.cjs')
 const {
@@ -86,6 +87,7 @@ const EXTERNAL_VIDEO_FILES_CHANNEL = 'external-video-files:open'
 const EXTERNAL_VIDEO_RENDERER_READY_CHANNEL = 'external-video-files:renderer-ready'
 const WINDOW_MINIMIZE_CHANNEL = 'window-controls:minimize'
 const WINDOW_TOGGLE_MAXIMIZE_CHANNEL = 'window-controls:toggle-maximize'
+const WINDOW_TOGGLE_FULLSCREEN_CHANNEL = 'window-controls:toggle-fullscreen'
 const WINDOW_MAXIMIZED_STATE_CHANNEL = 'window-controls:maximized-state'
 const WINDOW_GET_MAXIMIZED_STATE_CHANNEL = 'window-controls:get-maximized-state'
 const WINDOW_FULLSCREEN_STATE_CHANNEL = 'window-controls:fullscreen-state'
@@ -806,6 +808,9 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     else target.maximize()
     return target.isMaximized()
   })
+  ipcMain.handle(WINDOW_TOGGLE_FULLSCREEN_CHANNEL, (event) =>
+    toggleWindowFullscreen(getWindowsControlTarget(event)),
+  )
   ipcMain.handle(WINDOW_GET_MAXIMIZED_STATE_CHANNEL, (event) =>
     getWindowsControlTarget(event)?.isMaximized() ?? false,
   )

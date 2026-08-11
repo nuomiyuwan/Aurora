@@ -2883,7 +2883,6 @@ input:focus-visible {
   left: 9.8%;
 }
 
-.videoClipCard.isHitHovered,
 .videoClipCard.selected,
 .videoClipCard.isDragSource {
   --clip-hover-lift: -5px;
@@ -2953,14 +2952,20 @@ input:focus-visible {
   height: calc(49.2% - var(--detail-card-image-trim, 8px));
   overflow: hidden;
   border-radius: 15px 15px 0px 0px;
-  background-image:
-    linear-gradient(180deg, rgba(6, 9, 14, 0), rgba(6, 9, 14, 0.22) 62%, rgba(5, 7, 11, 0.58)),
-    var(--clip-preview-cover, var(--clip-cover));
-  background-position: center;
-  background-size: cover;
+  background: rgba(4, 7, 12, 0.96);
   box-shadow: none;
   filter: none;
   clip-path: none;
+}
+
+.videoClipColorImage {
+  position: absolute;
+  inset: 0;
+  background-image: var(--clip-preview-cover, var(--clip-cover));
+  background-position: center;
+  background-size: cover;
+  filter: var(--media-color-filter, brightness(1));
+  transition: filter 180ms ease;
 }
 
 .videoClipHoverScrubVideo {
@@ -2975,7 +2980,8 @@ input:focus-visible {
   object-fit: cover;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 90ms ease;
+  filter: var(--media-color-filter, brightness(1));
+  transition: opacity 90ms ease, filter 180ms ease;
 }
 
 .videoClipHoverScrubVideo[data-frame-ready='true'] {
@@ -2984,20 +2990,6 @@ input:focus-visible {
 
 .videoClipImage::after {
   content: none;
-}
-
-.videoClipImage[data-hover-scrubbing='video']::after {
-  content: '';
-  position: absolute;
-  z-index: 2;
-  inset: 0;
-  background: linear-gradient(
-    180deg,
-    rgba(6, 9, 14, 0),
-    rgba(6, 9, 14, 0.22) 62%,
-    rgba(5, 7, 11, 0.58)
-  );
-  pointer-events: none;
 }
 
 .videoClipFrame {
@@ -3021,14 +3013,12 @@ input:focus-visible {
   transition: opacity 180ms ease, filter 180ms ease;
 }
 
-.videoClipCard.isHitHovered .videoClipLight,
 .videoClipCard.selected .videoClipLight,
 .videoClipCard.isDragSource .videoClipLight {
   opacity: 0.96;
   filter: drop-shadow(0 0 50px rgba(146, 190, 255, 0.28)) var(--asset-ui-tint-filter);
 }
 
-.videoClipCard.isHitHovered .videoClipFrame,
 .videoClipCard.selected .videoClipFrame,
 .videoClipCard.isDragSource .videoClipFrame {
   filter:
@@ -3288,11 +3278,7 @@ input:focus-visible {
   overflow: hidden;
   border: calc(1px * var(--detail-panel-scale)) solid rgba(224, 230, 244, 0.1);
   border-radius: calc(18px * var(--detail-panel-scale));
-  background-image:
-    linear-gradient(180deg, rgba(4, 6, 10, 0.02), rgba(4, 6, 10, 0.34) 65%, rgba(4, 6, 10, 0.58)),
-    var(--clip-cover);
-  background-position: center;
-  background-size: cover;
+  background: rgba(3, 5, 9, 0.92);
   box-shadow:
     inset 0 -40px 58px rgba(0, 0, 0, 0.28),
     0 14px 32px rgba(0, 0, 0, 0.28);
@@ -3310,6 +3296,7 @@ input:focus-visible {
   box-shadow: 0 0 18px rgba(178, 208, 255, 0.22);
 }
 
+.detailPreviewPoster,
 .detailPreviewVideo,
 .detailPreviewVideoShade {
   position: absolute;
@@ -3320,15 +3307,26 @@ input:focus-visible {
   pointer-events: none;
 }
 
-.detailPreviewVideo {
+.detailPreviewPoster {
   z-index: 0;
+  background-image: var(--clip-cover);
+  background-position: center;
+  background-size: cover;
+  filter: var(--media-color-filter, brightness(1));
+  transition: filter 180ms ease;
+}
+
+.detailPreviewVideo {
+  z-index: 1;
   display: block;
   background: rgba(3, 5, 9, 0.92);
   object-fit: cover;
+  filter: var(--media-color-filter, brightness(1));
+  transition: filter 180ms ease;
 }
 
 .detailPreviewVideoShade {
-  z-index: 1;
+  z-index: 2;
   background: linear-gradient(
     180deg,
     rgba(4, 6, 10, 0.02),
@@ -3339,7 +3337,7 @@ input:focus-visible {
 
 .detailPreviewPlayButton {
   position: relative;
-  z-index: 2;
+  z-index: 3;
   display: grid;
   place-items: center;
   border: 0;
@@ -3347,6 +3345,46 @@ input:focus-visible {
   color: inherit;
   cursor: pointer;
   padding: 0;
+}
+
+.detailPreviewColorPresetButton {
+  position: absolute;
+  z-index: 4;
+  top: calc(8px * var(--detail-panel-scale));
+  right: calc(8px * var(--detail-panel-scale));
+  display: inline-flex;
+  min-width: calc(36px * var(--detail-panel-scale));
+  height: calc(17px * var(--detail-panel-scale));
+  align-items: center;
+  justify-content: center;
+  border: calc(1px * var(--detail-panel-scale)) solid rgba(232, 237, 248, 0.09);
+  border-radius: calc(5px * var(--detail-panel-scale));
+  background: var(--glass-surface);
+  box-shadow: inset 0 calc(1px * var(--detail-panel-scale)) 0 rgba(255, 255, 255, 0.035);
+  color: rgba(235, 240, 250, 0.64);
+  cursor: pointer;
+  font: inherit;
+  font-size: calc(8px * var(--detail-panel-scale));
+  line-height: 1;
+  padding: 0 calc(5px * var(--detail-panel-scale));
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.42);
+  user-select: none;
+  white-space: nowrap;
+  transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease;
+}
+
+.detailPreviewColorPresetButton:hover,
+.detailPreviewColorPresetButton.active {
+  border-color: rgba(185, 210, 248, 0.14);
+  background: var(--glass-chip-tint);
+  color: rgba(239, 245, 255, 0.82);
+}
+
+.detailPreviewColorPresetButton:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 calc(1px * var(--detail-panel-scale)) rgba(168, 203, 255, 0.28),
+    inset 0 calc(1px * var(--detail-panel-scale)) 0 rgba(255, 255, 255, 0.035);
 }
 
 .detailPreviewPlayButton:focus-visible {
@@ -4144,6 +4182,169 @@ input:focus-visible {
   resize: none;
 }
 
+.clipAiMetadataOverlay {
+  z-index: 79;
+}
+
+.clipAiMetadataPanel {
+  width: 510px;
+  gap: 15px;
+}
+
+.clipAiMetadataState {
+  display: grid;
+  min-height: 156px;
+  place-items: center;
+  align-content: center;
+  gap: 9px;
+  border: 1px solid rgba(206, 220, 242, 0.08);
+  border-radius: 13px;
+  background: rgba(14, 19, 29, 0.22);
+  color: rgba(187, 211, 248, 0.76);
+  text-align: center;
+}
+
+.clipAiMetadataState strong {
+  color: rgba(237, 240, 246, 0.84);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.clipAiMetadataState small {
+  max-width: 320px;
+  color: rgba(204, 211, 224, 0.44);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.clipAiMetadataError {
+  color: rgba(221, 187, 178, 0.72);
+}
+
+.clipAiMetadataSpinner {
+  animation: clipAiMetadataSpin 1.1s linear infinite;
+}
+
+.clipAiMetadataSuggestionGroup {
+  display: grid;
+  gap: 9px;
+}
+
+.clipAiMetadataSuggestionGroup > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.clipAiMetadataSuggestionGroup > header strong {
+  color: rgba(232, 236, 244, 0.76);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.clipAiMetadataSuggestionGroup > header small,
+.clipAiMetadataLimitHint,
+.clipAiMetadataEvidence {
+  color: rgba(202, 210, 223, 0.4);
+  font-size: 9px;
+}
+
+.clipAiMetadataTagChoices {
+  display: flex;
+  min-height: 29px;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.clipAiMetadataTagChoices button {
+  display: inline-flex;
+  min-height: 29px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid rgba(207, 219, 240, 0.1);
+  border-radius: 8px;
+  background: var(--glass-chip-tint);
+  color: rgba(220, 227, 239, 0.58);
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  padding: 6px 10px;
+  transition: border-color 160ms ease, color 160ms ease, background-color 160ms ease;
+}
+
+.clipAiMetadataTagChoices button.selected {
+  border-color: rgba(157, 194, 251, 0.24);
+  background: rgba(75, 104, 151, 0.18);
+  color: rgba(235, 240, 248, 0.84);
+}
+
+.clipAiMetadataTagChoices button:disabled {
+  cursor: default;
+  opacity: 0.34;
+}
+
+.clipAiMetadataEmptySuggestion {
+  margin: 0;
+  color: rgba(204, 211, 224, 0.42);
+  font-size: 10px;
+}
+
+.clipAiMetadataNoteChoice {
+  display: grid;
+  min-height: 56px;
+  grid-template-columns: minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid rgba(207, 219, 240, 0.09);
+  border-radius: 11px;
+  background: rgba(17, 23, 35, 0.24);
+  color: rgba(220, 227, 239, 0.58);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.6;
+  padding: 10px 12px;
+  text-align: left;
+  transition: border-color 160ms ease, color 160ms ease, background-color 160ms ease;
+}
+
+.clipAiMetadataNoteChoice.selected {
+  border-color: rgba(157, 194, 251, 0.2);
+  background: rgba(63, 88, 130, 0.15);
+  color: rgba(235, 239, 247, 0.8);
+}
+
+.clipAiMetadataNoteChoice:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.clipAiMetadataChoiceState {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid rgba(181, 202, 234, 0.14);
+  border-radius: 7px;
+  color: rgba(187, 213, 251, 0.82);
+}
+
+.clipAiMetadataEvidence {
+  display: flex;
+  min-height: 13px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+@keyframes clipAiMetadataSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .clipNoteEditorInput::placeholder {
   color: rgba(205, 211, 222, 0.34);
 }
@@ -4735,6 +4936,11 @@ input:focus-visible {
   height: 48px;
   border-radius: 7px;
   object-fit: cover;
+}
+
+.frameRingSmartCandidate img,
+.frameRingSmartSuggestionList img {
+  filter: var(--media-color-filter, brightness(1));
 }
 
 .frameRingSmartCandidatePlaceholder {
@@ -5660,7 +5866,6 @@ input:focus-visible {
   width: var(--detail-card-size);
 }
 
-.videoClipCard.isHitHovered,
 .videoClipCard.selected,
 .videoClipCard.isDragSource {
   --clip-hover-lift: calc(-3px * var(--detail-card-scale));
@@ -5745,7 +5950,36 @@ input:focus-visible {
   flex: 1 1 auto;
   flex-direction: column;
   gap: calc(12px * var(--detail-panel-scale));
+  overflow: hidden;
   transform: translateY(calc(-8px * var(--detail-panel-scale)));
+}
+
+.detailPanelMetadata {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: calc(9px * var(--detail-panel-scale));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+.detailPanelMetadata::-webkit-scrollbar {
+  display: none;
+}
+
+.detailPanelMetadata[data-compact='true'] {
+  gap: calc(7px * var(--detail-panel-scale));
+}
+
+.detailPanelMetadata[data-compact='true'] .clipFacts {
+  gap: calc(2px * var(--detail-panel-scale));
+}
+
+.detailPanelMetadata[data-compact='true'] .clipFacts p {
+  line-height: 1.35;
 }
 
 .detailPreview {
@@ -5773,7 +6007,6 @@ input:focus-visible {
   opacity: 0.32;
 }
 
-.videoClipCard.isHitHovered .videoClipFrame,
 .videoClipCard.selected .videoClipFrame,
 .videoClipCard.isDragSource .videoClipFrame {
   opacity: 0.98;
@@ -5786,13 +6019,47 @@ input:focus-visible {
 }
 
 .clipFacts p {
-  line-height: 1.6;
+  line-height: 1.5;
+}
+
+.detailIndexStatus {
+  flex: 0 0 auto;
 }
 
 .detailNoteHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.detailTagHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(8px * var(--detail-panel-scale));
+}
+
+.detailTagHeader h2 {
+  margin: 0;
+}
+
+.detailAiMetadataButton {
+  display: inline-flex;
+  height: calc(22px * var(--detail-panel-scale));
+  align-items: center;
+  gap: calc(4px * var(--detail-panel-scale));
+  border: 0;
+  background: transparent;
+  color: rgba(183, 207, 245, 0.62);
+  cursor: pointer;
+  font: inherit;
+  font-size: calc(9px * var(--detail-panel-scale));
+  padding: 0;
+}
+
+.detailAiMetadataButton:disabled {
+  cursor: default;
+  opacity: 0.42;
 }
 
 .detailNoteHeader h2 {
@@ -6302,6 +6569,8 @@ input:focus-visible {
   width: 89.583333%;
   height: 80.740741%;
   object-fit: contain;
+  filter: var(--media-color-filter, brightness(1));
+  transition: filter 180ms ease;
 }
 
 .frameRingPreviewFrame {
@@ -7568,7 +7837,7 @@ input:focus-visible {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  filter: brightness(0.63) saturate(0.72);
+  filter: var(--media-color-filter, brightness(1)) brightness(0.63) saturate(0.72);
 }
 
 .frameRingTrimShade {
@@ -8014,7 +8283,11 @@ input:focus-visible {
   background-position: var(--frame-cover-x) var(--frame-cover-y);
   background-repeat: no-repeat;
   background-size: contain;
-  filter: brightness(calc(var(--frame-cover-brightness) * 1.08)) saturate(0.92);
+  filter:
+    var(--media-color-filter, brightness(1))
+    brightness(calc(var(--frame-cover-brightness) * 1.08))
+    saturate(0.92);
+  transition: filter 180ms ease;
 }
 
 .frameRingCardFrame,
@@ -8101,7 +8374,10 @@ input:focus-visible {
 }
 
 .frameRingCard.selected .frameRingCardImage {
-  filter: brightness(calc(var(--frame-cover-brightness) * 1.18)) saturate(1.0);
+  filter:
+    var(--media-color-filter, brightness(1))
+    brightness(calc(var(--frame-cover-brightness) * 1.18))
+    saturate(1.0);
 }
 
 .frameRingCard.isHitHovered:not(.selected) .frameRingCardFrame {
