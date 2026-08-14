@@ -156,7 +156,7 @@ export const parseCssTransform = (value: string | null | undefined): THREE.Matri
   return null
 }
 
-const parseCssTranslate = (
+export const parseCssTranslate = (
   value: string | null | undefined,
   width: number,
   height: number,

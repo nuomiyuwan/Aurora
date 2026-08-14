@@ -99,12 +99,12 @@
 
 .discoveryProjectedGlassLayer:not([data-glass-active='true'][data-glass-cache-valid='true'])
   > .discoveryDetailProjectedGlass {
-  opacity: 0 !important;
+  opacity: 0.001 !important;
 }
 
 .discoveryProjectedGlassLayer[data-results-visible='false']
   > .discoveryDetailProjectedGlass {
-  opacity: 0 !important;
+  opacity: 0.001 !important;
 }
 
 .discoveryDetailProjectedGlass {
@@ -117,6 +117,34 @@
   pointer-events: none;
   transform: none;
   transition: opacity 320ms ease 90ms;
+  backdrop-filter:
+    blur(var(--discovery-detail-backdrop-blur))
+    saturate(1.08)
+    brightness(0.92);
+  -webkit-backdrop-filter:
+    blur(var(--discovery-detail-backdrop-blur))
+    saturate(1.08)
+    brightness(0.92);
+}
+
+/*
+ * A near-transparent, full-size detail surface keeps Chromium's backdrop
+ * pipeline warm before the first search result exists. The real projected
+ * glass takes over once result geometry is available.
+ */
+.discoveryDetailWarmupGlass {
+  position: absolute;
+  top: calc(200px * var(--layout-scale));
+  left: calc(1240px * var(--layout-scale));
+  width: calc(324px * var(--layout-scale));
+  height: calc(518px * var(--layout-scale));
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 0;
+  border-radius: calc(16px * var(--layout-scale));
+  background: transparent;
+  opacity: 0.001 !important;
+  pointer-events: none;
   backdrop-filter:
     blur(var(--discovery-detail-backdrop-blur))
     saturate(1.08)
@@ -162,44 +190,68 @@
   visibility: hidden;
 }
 
+/*
+ * Startup paints the real App-root search glass. Keep that exact leaf in the
+ * compositor after warmup instead of removing it until the first discovery
+ * visit. The inactive cluster is inert; this alpha is only a paint-retention
+ * signal and is not visually observable.
+ */
+.discoverySearchCluster[data-page-active='false']
+  .discoverySearchBar[data-startup-glass-prepared='true'] {
+  visibility: visible;
+  opacity: 0.001;
+  pointer-events: none;
+}
+
 .auroraApp .discoverySearchBar {
   position: absolute;
   top: calc(
     var(--layout-plane-top) +
-    108px * var(--layout-scale)
+    108px * var(--layout-scale) +
+    var(--discovery-search-offset-y) * var(--layout-scale)
   );
   left: calc(
     var(--layout-plane-left) +
-    228px * var(--layout-scale)
+    228px * var(--layout-scale) +
+    var(--discovery-search-offset-x) * var(--layout-scale)
   );
   display: grid;
   box-sizing: border-box;
-  width: 820px;
-  height: 54px;
-  grid-template-columns: 22px minmax(0, 1fr) auto 40px;
+  width: calc(820px * var(--layout-scale));
+  height: calc(54px * var(--layout-scale));
+  grid-template-columns:
+    calc(22px * var(--layout-scale))
+    minmax(0, 1fr)
+    auto
+    calc(40px * var(--layout-scale));
   align-items: center;
-  gap: 12px;
+  gap: calc(12px * var(--layout-scale));
   border-color: var(--ui-2d-border-color);
-  border-radius: 18px;
+  border-radius: calc(18px * var(--layout-scale));
   background: rgba(10, 15, 24, 0.1);
   background-clip: padding-box;
   box-shadow: none;
-  padding: 0 7px 0 18px;
+  padding:
+    0
+    calc(7px * var(--layout-scale))
+    0
+    calc(18px * var(--layout-scale));
   pointer-events: auto;
-  transform:
-    translate3d(
-      calc(var(--discovery-search-offset-x) * var(--layout-scale)),
-      calc(var(--discovery-search-offset-y) * var(--layout-scale)),
-      0
-    )
-    scale(var(--layout-scale));
-  transform-origin: left top;
-  transition: transform 520ms cubic-bezier(0.16, 0.82, 0.2, 1);
-  backdrop-filter: blur(18px) saturate(1.08);
-  -webkit-backdrop-filter: blur(18px) saturate(1.08);
+  transform: none;
+  transition:
+    top 520ms cubic-bezier(0.16, 0.82, 0.2, 1),
+    left 520ms cubic-bezier(0.16, 0.82, 0.2, 1);
+  backdrop-filter:
+    blur(calc(18px * var(--layout-scale)))
+    saturate(1.08);
+  -webkit-backdrop-filter:
+    blur(calc(18px * var(--layout-scale)))
+    saturate(1.08);
 }
 
 .discoverySearchBar > svg {
+  width: calc(20px * var(--layout-scale));
+  height: calc(20px * var(--layout-scale));
   color: rgba(202, 205, 214, 0.58);
 }
 
@@ -214,7 +266,7 @@
   background-color: transparent !important;
   box-shadow: none !important;
   color: var(--discovery-ui-text-strong);
-  font-size: 14px;
+  font-size: calc(14px * var(--layout-scale));
   letter-spacing: 0.01em;
   padding: 0;
 }
@@ -234,15 +286,15 @@
 .discoveryAiSearchToggle {
   display: inline-flex;
   box-sizing: border-box;
-  height: 30px;
+  height: calc(30px * var(--layout-scale));
   align-items: center;
-  gap: 6px;
+  gap: calc(6px * var(--layout-scale));
   border: 1px solid rgba(211, 222, 239, 0.1);
-  border-radius: 10px;
+  border-radius: calc(10px * var(--layout-scale));
   background: rgba(3, 7, 13, 0.16);
   color: rgba(194, 204, 219, 0.48);
   cursor: pointer;
-  padding: 0 8px;
+  padding: 0 calc(8px * var(--layout-scale));
   transition:
     border-color 180ms ease,
     background-color 180ms ease,
@@ -265,7 +317,7 @@
 }
 
 .discoveryAiSearchLabel {
-  font-size: 10px;
+  font-size: calc(10px * var(--layout-scale));
   font-weight: 500;
   letter-spacing: 0.08em;
 }
@@ -274,8 +326,8 @@
   position: relative;
   display: block;
   box-sizing: border-box;
-  width: 23px;
-  height: 13px;
+  width: calc(23px * var(--layout-scale));
+  height: calc(13px * var(--layout-scale));
   border: 1px solid rgba(208, 218, 235, 0.15);
   border-radius: 99px;
   background: rgba(1, 4, 9, 0.3);
@@ -286,10 +338,10 @@
 
 .discoveryAiSearchSwitch > span {
   position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 7px;
-  height: 7px;
+  top: calc(2px * var(--layout-scale));
+  left: calc(2px * var(--layout-scale));
+  width: calc(7px * var(--layout-scale));
+  height: calc(7px * var(--layout-scale));
   border-radius: 50%;
   background: rgba(199, 208, 222, 0.58);
   transition:
@@ -306,16 +358,21 @@
 .discoveryAiSearchToggle[aria-pressed='true'] .discoveryAiSearchSwitch > span {
   background: rgba(219, 235, 255, 0.94);
   box-shadow: 0 0 8px rgba(117, 167, 245, 0.62);
-  transform: translateX(10px);
+  transform: translateX(calc(10px * var(--layout-scale)));
+}
+
+.discoveryAiSearchToggle > svg {
+  width: calc(13px * var(--layout-scale));
+  height: calc(13px * var(--layout-scale));
 }
 
 .discoverySearchSubmit {
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: calc(36px * var(--layout-scale));
+  height: calc(36px * var(--layout-scale));
   place-items: center;
   border: 1px solid var(--discovery-ui-accent-border);
-  border-radius: 12px;
+  border-radius: calc(12px * var(--layout-scale));
   background: linear-gradient(
     180deg,
     rgba(93, 133, 199, 0.2),
@@ -330,7 +387,12 @@
 .discoverySearchSubmit:hover:not(:disabled) {
   border-color: rgba(184, 213, 255, 0.72);
   color: rgba(236, 243, 255, 0.96);
-  transform: translateX(1px);
+  transform: translateX(calc(1px * var(--layout-scale)));
+}
+
+.discoverySearchSubmit > svg {
+  width: calc(18px * var(--layout-scale));
+  height: calc(18px * var(--layout-scale));
 }
 
 .discoverySearchSubmit:disabled {
@@ -1722,4 +1784,81 @@
   .discoverySearchSubmit:disabled svg {
     animation: none;
   }
+}
+
+/*
+ * Chromium on Windows can preserve the 1706 x 956 discovery plane as a
+ * low-resolution 3D texture and upscale it on high-DPI displays. CSS zoom
+ * performs the same responsive sizing during layout, so text, cards and the
+ * detail panel are painted at their final on-screen density.
+ */
+.auroraApp[data-platform='win32'] .discoveryPlane {
+  top: var(--layout-plane-design-top);
+  left: var(--layout-plane-design-left);
+  zoom: var(--layout-scale);
+  transform: none;
+}
+
+.auroraApp[data-platform='win32'] :is(
+  .discoveryCameraRig,
+  .discoveryResultCard,
+  .discoveryResultMotion
+) {
+  will-change: auto;
+}
+
+.auroraApp[data-platform='win32'] .discoveryResultMotion {
+  --page-local-filter: none;
+  filter: none;
+}
+
+.auroraApp[data-platform='win32']
+  .discoveryResultCard:is(.selected, .isCorridorFront)
+  .discoveryResultVisual {
+  filter: none;
+}
+
+.auroraApp[data-platform='win32'] .discoveryDetailPanel {
+  --page-local-filter: none;
+  filter: none;
+}
+
+.auroraApp[data-platform='win32'] .discoveryDetailChrome {
+  filter:
+    drop-shadow(0 23px 54px rgba(0, 0, 0, 0.34))
+    drop-shadow(0 0 12px rgba(142, 184, 255, 0.1))
+    var(--asset-ui-tint-filter);
+}
+
+.auroraApp[data-platform='win32'].hasPageColorGrade .discoveryResultMedia {
+  filter:
+    brightness(
+      var(
+        --discovery-corridor-brightness,
+        var(--discovery-card-brightness, 0.82)
+      )
+    )
+    saturate(
+      var(
+        --discovery-corridor-saturation,
+        var(--discovery-card-saturation, 0.78)
+      )
+    )
+    var(--page-color-grade-filter);
+}
+
+.auroraApp[data-platform='win32'].hasPageColorGrade .discoveryDetailChrome {
+  filter:
+    drop-shadow(0 23px 54px rgba(0, 0, 0, 0.34))
+    drop-shadow(0 0 12px rgba(142, 184, 255, 0.1))
+    var(--asset-ui-tint-filter)
+    var(--page-color-grade-filter);
+}
+
+.auroraApp[data-platform='win32'] :is(
+  .discoveryResultCards,
+  .discoveryDetailPanel,
+  .discoveryFooter
+) {
+  animation-fill-mode: backwards;
 }

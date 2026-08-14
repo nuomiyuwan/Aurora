@@ -325,8 +325,10 @@ export function ModelViewerPage({
       if (hitZone) {
         const mountRect = mount.getBoundingClientRect()
         const hitRect = hitZone.getBoundingClientRect()
-        viewHelper.location.left = hitRect.left - mountRect.left
-        viewHelper.location.top = hitRect.top - mountRect.top
+        const scaleX = mountRect.width > 0 ? mountRect.width / width : 1
+        const scaleY = mountRect.height > 0 ? mountRect.height / height : 1
+        viewHelper.location.left = (hitRect.left - mountRect.left) / scaleX
+        viewHelper.location.top = (hitRect.top - mountRect.top) / scaleY
       }
     }
     resizeObserver = new ResizeObserver(resize)

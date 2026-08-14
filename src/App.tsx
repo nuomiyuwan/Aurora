@@ -134,9 +134,11 @@ import { resolveFrameRingLayout } from './features/frame-ring/frameRingLayout'
 import type { FrameRingEntryIntent } from './features/frame-ring/frameRingEntryIntent'
 import {
   createFrameRingFrames,
+  formatFrameRingTimecode,
   getDefaultFrameIndex,
   getFrameRingReflectionPreloadFrames,
   getVisibleFrameRange,
+  parseFrameRingFps,
   resolveFrameRingPreviewTask,
 } from './features/frame-ring/frameRingData'
 import {
@@ -153,6 +155,10 @@ import {
   GALLERY_GROUND_Y_RATIO,
   getHomeCardAlphaBottomOffset,
 } from './features/project-gallery/galleryCardLayout'
+import {
+  FavoritesGalleryView,
+  type FavoriteGalleryItem,
+} from './features/favorites-gallery/FavoritesGalleryView'
 import {
   AURORA_LAYOUT_REFERENCE,
   AURORA_TOPBAR_CENTER_Y,
@@ -319,6 +325,12 @@ const PAGE_VISUAL_CAPABILITIES = {
     particles: false,
     projectDetails: false,
   },
+  favorites: {
+    label: '收藏展馆',
+    reflection: true,
+    particles: false,
+    projectDetails: false,
+  },
 } as const satisfies Record<string, PageVisualCapabilities>
 
 type AppView = keyof typeof PAGE_VISUAL_CAPABILITIES
@@ -338,15 +350,22 @@ type PageTransitionDirection = 'deeper' | 'shallower'
 type SettingsPanelMode = 'visual' | 'emby'
 
 const DISCOVERY_ROUTE_HASH = '#/discovery'
+const FAVORITES_ROUTE_HASH = '#/favorites'
 const SCENE_CAMERA_PITCH_RANGE = [-10, 8] as const
 
-const readAppViewFromLocation = (): AppView =>
-  window.location.hash.toLocaleLowerCase() === DISCOVERY_ROUTE_HASH
-    ? 'online-search'
-    : 'gallery'
+const readAppViewFromLocation = (): AppView => {
+  const route = window.location.hash.toLocaleLowerCase()
+  if (route === DISCOVERY_ROUTE_HASH) return 'online-search'
+  if (route === FAVORITES_ROUTE_HASH) return 'favorites'
+  return 'gallery'
+}
 
 const writeAppViewRoute = (view: AppView) => {
-  const nextHash = view === 'online-search' ? DISCOVERY_ROUTE_HASH : ''
+  const nextHash = view === 'online-search'
+    ? DISCOVERY_ROUTE_HASH
+    : view === 'favorites'
+      ? FAVORITES_ROUTE_HASH
+      : ''
   if (window.location.hash === nextHash) return
   const nextUrl = `${window.location.pathname}${window.location.search}${nextHash}`
   window.history.pushState({ auroraView: view }, '', nextUrl)
@@ -367,6 +386,7 @@ const createEmptyReflectionSurfaces = (): Record<ReflectionView, BackgroundRefle
   'video-library': null,
   'frame-ring': null,
   'online-search': null,
+  favorites: null,
 })
 
 const createEmptyReflectionNotices = (): Record<ReflectionView, ReflectionSurfaceNotice> => ({
@@ -374,6 +394,7 @@ const createEmptyReflectionNotices = (): Record<ReflectionView, ReflectionSurfac
   'video-library': null,
   'frame-ring': null,
   'online-search': null,
+  favorites: null,
 })
 
 const createReflectionRequestVersions = (): Record<ReflectionView, number> => ({
@@ -381,6 +402,7 @@ const createReflectionRequestVersions = (): Record<ReflectionView, number> => ({
   'video-library': 0,
   'frame-ring': 0,
   'online-search': 0,
+  favorites: 0,
 })
 
 const createPageImportRequestVersions = (): Record<AppView, number> =>
@@ -697,6 +719,7 @@ const PAGE_VIEW_DEPTH: Record<AppView, number> = {
   'model-library': 1,
   'model-viewer': 2,
   'online-search': 1,
+  favorites: 1,
 }
 const CLIP_TRACK_VISIBLE_COLUMNS = 4
 const CLIP_TRACK_SPRING_STIFFNESS = 220
@@ -1493,6 +1516,13 @@ function getCardVisualStyle(
     layout.planeTop +
     layout.planeHeight * GALLERY_GROUND_Y_RATIO -
     getHomeCardAlphaBottomOffset(visualCardScale)
+  const cardVisualFilter = `blur(${blur * layout.layoutScale * HOME_CARD_DOM_RASTER_SCALE * HOME_CARD_SURFACE_RASTER_SCALE}px) saturate(${saturate}) brightness(${brightness})`
+  const cardTextFilter =
+    Math.abs(blur) < 0.0001 &&
+    Math.abs(saturate - 1) < 0.0001 &&
+    Math.abs(brightness - 1) < 0.0001
+      ? 'none'
+      : cardVisualFilter
 
   return {
     '--card-left': `${cardLeft}px`,
@@ -1506,7 +1536,8 @@ function getCardVisualStyle(
     '--card-depth': `${cardDepth * layout.layoutScale}px`,
     '--card-z': stablePaintLayer,
     '--reflection-slot-opacity': reflectionOpacity * edgeFade,
-    '--card-visual-filter': `blur(${blur * layout.layoutScale * HOME_CARD_DOM_RASTER_SCALE * HOME_CARD_SURFACE_RASTER_SCALE}px) saturate(${saturate}) brightness(${brightness})`,
+    '--card-text-filter': cardTextFilter,
+    '--card-visual-filter': cardVisualFilter,
   } as CSSProperties
 }
 
@@ -1688,11 +1719,31 @@ function App() {
   })
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth)
   const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight)
+  const appPlatform = window.desktopBridge?.platform ?? 'web'
+  /*
+   * Chromium can retain the old DirectWrite texture after a Windows window
+   * resize changes the scale of the gallery's 3D ancestors. Re-key only the
+   * text paint leaves at the new physical viewport size; media, card state and
+   * interaction layers stay mounted throughout the native resize.
+   */
+  const windowsTextRasterRevision = appPlatform === 'win32'
+    ? `${Math.round(viewportWidth * window.devicePixelRatio)}x${Math.round(
+        viewportHeight * window.devicePixelRatio,
+      )}`
+    : 'stable'
   const [activeNav, setActiveNav] = useState<NavId>(() =>
-    readAppViewFromLocation() === 'online-search' ? 'online-search' : 'library',
+    readAppViewFromLocation() === 'online-search'
+      ? 'online-search'
+      : readAppViewFromLocation() === 'favorites'
+        ? 'favorites'
+        : 'library',
   )
   const startupInitialViewRef = useRef<StartupWarmupView>(
-    currentView === 'online-search' ? 'online-search' : 'gallery',
+    currentView === 'online-search'
+      ? 'online-search'
+      : currentView === 'favorites'
+        ? 'favorites'
+        : 'gallery',
   )
   const startupGateEnabledRef = useRef(
     Boolean(window.desktopBridge) ||
@@ -3157,6 +3208,183 @@ function App() {
     projectAssetRefs,
     visualIndexes,
   ])
+  const favoriteGalleryItems = useMemo<FavoriteGalleryItem[]>(() => {
+    const items: FavoriteGalleryItem[] = []
+    const clipsByAssetId = new Map<string, VideoClip>()
+    videoClips.forEach((clip) => {
+      if (!clipsByAssetId.has(clip.assetId)) clipsByAssetId.set(clip.assetId, clip)
+    })
+
+    const favoriteFrames = frameAnnotations
+      .map((annotation, sourceIndex) => ({
+        annotation,
+        sourceIndex,
+        rating: Number.isFinite(annotation.rating)
+          ? Math.min(5, Math.max(0, Math.round(annotation.rating)))
+          : 0,
+      }))
+      .filter(({ annotation }) => annotation.favorite)
+      .sort(
+        (first, second) =>
+          second.rating - first.rating ||
+          first.sourceIndex - second.sourceIndex,
+      )
+
+    favoriteFrames.forEach(({ annotation, rating }) => {
+      const clip = clipsByAssetId.get(annotation.assetId)
+      const frame = clip?.indexedFrames.find(
+        (candidate) => candidate.id === annotation.frameId,
+      )
+      if (!clip || !frame) return
+      const frameOrdinal = Math.max(
+        1,
+        clip.indexedFrames.findIndex((candidate) => candidate.id === frame.id) + 1,
+      )
+      const frameOrdinalDigits = String(
+        Math.max(1, clip.indexedFrames.length),
+      ).length
+      const frameTimecode = formatFrameRingTimecode(
+        frame.timeSeconds,
+        clip.fpsValue ?? parseFrameRingFps(clip.fps),
+      )
+      const compactFrameTimecode = frameTimecode.startsWith('00:')
+        ? frameTimecode.slice(3)
+        : frameTimecode
+      items.push({
+        id: `favorite-frame:${clip.assetId}:${frame.id}`,
+        kind: 'frame',
+        title: clip.filename.replace(/\.[^.]+$/, ''),
+        titleSuffix: `帧 ${compactFrameTimecode}`,
+        label: '单帧',
+        rating,
+        meta: `索引帧 ${String(frameOrdinal).padStart(frameOrdinalDigits, '0')} / ${clip.indexedFrames.length} · ${clip.resolutionBadge ?? clip.resolution}`,
+        tags: annotation.tags,
+        cover: frame.thumbnail || clip.thumbnail,
+        source: {
+          type: 'frame',
+          assetId: clip.assetId,
+          frameId: frame.id,
+        },
+      })
+    })
+
+    clipsByAssetId.forEach((clip) => {
+      if (!clip.favorite || clip.online) return
+      const kind =
+        clip.durationSeconds !== null && clip.durationSeconds <= 90
+          ? 'clip'
+          : 'video'
+      items.push({
+        id: `favorite-media:${clip.assetId}`,
+        kind,
+        title: clip.filename.replace(/\.[^.]+$/, ''),
+        label: kind === 'clip' ? '视频片段' : '视频素材',
+        meta: `${clip.duration} · ${clip.resolutionBadge ?? clip.resolution} · ${clip.codec}`,
+        tags: clip.tags,
+        cover: clip.thumbnail,
+        source: { type: 'media', assetId: clip.assetId },
+      })
+    })
+
+    modelAssets.forEach((model) => {
+      if (!model.favorite) return
+      const project = displayProjects.find(
+        (candidate) => candidate.id === model.projectId,
+      )
+      const cover = resolveLibraryMediaUrl(model.thumbnail) || project?.cover
+      if (!cover) return
+      items.push({
+        id: `favorite-model:${model.id}`,
+        kind: 'model',
+        title: model.filename.replace(/\.[^.]+$/, ''),
+        label: '三维资产',
+        meta: `${getModelAssetFormatLabel(model.format)} · ${formatMediaFileSize(model.sizeBytes)}`,
+        tags: model.tags,
+        cover,
+        source: { type: 'model', assetId: model.id },
+      })
+    })
+
+    mediaAssets.forEach((asset) => {
+      if (!asset.favorite || !isOnlineMediaAsset(asset)) return
+      const cover = resolveLibraryMediaUrl(asset.thumbnail)
+      if (!cover) return
+      items.push({
+        id: `favorite-online:${asset.id}`,
+        kind: 'online',
+        title: asset.filename || asset.online.mediaId,
+        label: asset.online.kind === 'episode' ? '影视剧集' : '在线视频',
+        meta: asset.online.author || asset.online.publishedAt || '在线收藏',
+        tags: clipsByAssetId.get(asset.id)?.tags ?? [],
+        statusBadges: [
+          '在线',
+          getOnlineProviderLabel(asset.online.provider),
+        ],
+        cover,
+        source: { type: 'media', assetId: asset.id },
+      })
+    })
+
+    if (items.length > 0 || !import.meta.env.DEV || window.desktopBridge) {
+      return items
+    }
+
+    const previewProjects = [
+      displayProjects[2],
+      displayProjects[1],
+      displayProjects[3],
+      displayProjects[0],
+      displayProjects[4],
+    ].filter(Boolean)
+    const previewKinds: FavoriteGalleryItem['kind'][] = [
+      'frame',
+      'clip',
+      'model',
+      'video',
+      'online',
+    ]
+    const previewLabels: Record<FavoriteGalleryItem['kind'], string> = {
+      frame: '单帧',
+      clip: '视频片段',
+      video: '视频素材',
+      model: '三维资产',
+      online: '在线收藏',
+    }
+    const previewMeta: Record<FavoriteGalleryItem['kind'], string> = {
+      frame: '00:31:08 · 8K · RAW',
+      clip: '00:18 · 4K · HEVC',
+      video: '03:24 · 4K · ProRes',
+      model: 'GLB · 84.6 MB',
+      online: 'Bilibili · 12:48 · 4K',
+    }
+    return previewProjects.flatMap((project, index) => {
+      if (!project.cover) return []
+      const kind = previewKinds[index] ?? 'frame'
+      return [{
+        id: `favorite-preview:${project.id}:${kind}`,
+        kind,
+        title:
+          kind === 'frame'
+            ? 'DJI_20250707163418_0026'
+            : project.title,
+        titleSuffix: kind === 'frame' ? '帧 00:12:08' : undefined,
+        label: previewLabels[kind],
+        rating: kind === 'frame' ? 5 : undefined,
+        meta: kind === 'frame'
+          ? '索引帧 03 / 41 · 4K'
+          : previewMeta[kind],
+        tags:
+          kind === 'frame'
+            ? [IMPORTED_CLIP_DEFAULT_TAG]
+            : kind === 'online'
+              ? ['国创', '中国大陆', '泡面']
+              : [],
+        statusBadges: kind === 'online' ? ['在线', 'B站'] : undefined,
+        cover: project.cover,
+        source: { type: 'preview', projectId: project.id } as const,
+      }]
+    })
+  }, [displayProjects, frameAnnotations, mediaAssets, modelAssets, videoClips])
   const activeProject = displayProjects[activeIndex]
   const selectedProject =
     displayProjects.find((project) => project.id === selectedProjectId) ?? activeProject
@@ -4100,6 +4328,8 @@ function App() {
       '--layout-scale': responsiveMetrics.layoutScale,
       '--layout-plane-left': `${responsiveMetrics.planeLeft}px`,
       '--layout-plane-top': `${responsiveMetrics.planeTop}px`,
+      '--layout-plane-design-left': `${responsiveMetrics.planeLeft / responsiveMetrics.layoutScale}px`,
+      '--layout-plane-design-top': `${responsiveMetrics.planeTop / responsiveMetrics.layoutScale}px`,
       '--layout-plane-right-inset': `${responsiveMetrics.rightInset}px`,
       '--layout-plane-bottom-inset': `${responsiveMetrics.bottomInset}px`,
       '--layout-plane-height': `${responsiveMetrics.planeHeight}px`,
@@ -4968,7 +5198,7 @@ function App() {
 
   function handleClipStagePointerDown(event: ReactPointerEvent<HTMLElement>) {
     clearClipHoverScrub()
-    if (event.button !== 0 || filteredProjectClips.length <= 1) return
+    if (event.button !== 0 || clipTrackMaxPosition <= 0) return
 
     const pointerTarget = event.target as HTMLElement
     const cardTarget = pointerTarget.closest(
@@ -5955,7 +6185,7 @@ function App() {
       )
 
       const emptyState = grid.parentElement?.querySelector<HTMLElement>(
-        '.videoProjectEmptyState, .videoProjectFilteredEmptyState',
+        '.videoProjectEmptyState[data-empty-visible="true"], .videoProjectFilteredEmptyState[data-empty-visible="true"]',
       )
       const emptyGlass = glassLayer.querySelector<HTMLElement>(
         '.videoLibraryEmptyProjectedGlass',
@@ -7728,8 +7958,8 @@ function App() {
   }, [])
 
   const transitionToView = useCallback((nextView: AppView, updateHistory = true) => {
-    if (updateHistory) writeAppViewRoute(nextView)
     if (nextView === currentView || pageTransitionActiveRef.current) return false
+    if (updateHistory) writeAppViewRoute(nextView)
 
     if (PAGE_VIEW_DEPTH[nextView] > PAGE_VIEW_DEPTH[currentView]) {
       pageParentViewRef.current[nextView] = currentView
@@ -7781,12 +8011,16 @@ function App() {
           : 'video-library'
     } else if (currentView === 'online-search') {
       fallbackView = 'gallery'
+    } else if (currentView === 'favorites') {
+      fallbackView = 'gallery'
     }
 
     const nextView = pageParentViewRef.current[currentView] ?? fallbackView
     if (!nextView) return false
     const nextNav: NavId = nextView === 'online-search'
       ? 'online-search'
+      : nextView === 'favorites'
+        ? 'favorites'
       : nextView === 'gallery'
         ? 'library'
         : 'project-details'
@@ -7926,7 +8160,13 @@ function App() {
   useEffect(() => {
     const handleHistoryNavigation = () => {
       const routeView = readAppViewFromLocation()
-      setActiveNav(routeView === 'online-search' ? 'online-search' : 'library')
+      setActiveNav(
+        routeView === 'online-search'
+          ? 'online-search'
+          : routeView === 'favorites'
+            ? 'favorites'
+            : 'library',
+      )
       setSearchOpen(false)
       setSettingsPanelOpen(false)
       transitionToView(routeView, false)
@@ -8018,7 +8258,11 @@ function App() {
     if (pageTransitionActiveRef.current) return
 
     if (id === 'favorites') {
-      showClipActionNotice('收藏页将在后续开发中开放。')
+      setActiveNav('favorites')
+      setSearchOpen(false)
+      setSettingsPanelOpen(false)
+      setAccountCenterOpen(false)
+      transitionToView('favorites')
       return
     }
 
@@ -8625,6 +8869,136 @@ function App() {
           : current,
       )
     }
+  }
+
+  function toggleFavoriteGalleryItem(item: FavoriteGalleryItem) {
+    const source = item.source
+    if (source.type === 'preview') return
+    if (source.type === 'model') {
+      toggleModelFavorite(source.assetId)
+      return
+    }
+    if (source.type === 'frame') {
+      const nextAnnotations = frameAnnotationsRef.current.map((annotation) =>
+        annotation.assetId === source.assetId &&
+        annotation.frameId === source.frameId
+          ? { ...annotation, favorite: !annotation.favorite }
+          : annotation,
+      )
+      frameAnnotationsRef.current = nextAnnotations
+      setFrameAnnotations(nextAnnotations)
+      return
+    }
+
+    const clip = videoClips.find(
+      (candidate) => candidate.assetId === source.assetId,
+    )
+    if (clip) {
+      toggleClipFavorite(clip)
+      return
+    }
+    const asset = mediaAssetsRef.current.find(
+      (candidate) => candidate.id === source.assetId,
+    )
+    if (asset && isOnlineMediaAsset(asset)) {
+      toggleOnlineAssetFavorite(
+        asset as OnlineVideoAddCandidate['asset'],
+      )
+    }
+  }
+
+  function openFavoriteGalleryItem(item: FavoriteGalleryItem) {
+    if (pageTransitionActiveRef.current) {
+      return false
+    }
+    const source = item.source
+    if (source.type === 'preview') {
+      const projectIndex = projects.findIndex(
+        (project) => project.id === source.projectId,
+      )
+      if (projectIndex < 0) return false
+      openProjectDetails(projectIndex)
+      return true
+    }
+    if (source.type === 'model') {
+      openModelViewer(source.assetId)
+      return true
+    }
+
+    const clip = videoClips.find(
+      (candidate) => candidate.assetId === source.assetId,
+    )
+    if (clip) {
+      const projectIndex = projects.findIndex(
+        (project) => project.id === clip.projectId,
+      )
+      if (projectIndex < 0) return false
+      setActiveIndex(projectIndex)
+      setSelectedProjectId(clip.projectId)
+      setSelectedClipId(clip.id)
+      if (clip.online) {
+        const onlineAsset = mediaAssetsRef.current.find(
+          (candidate) =>
+            candidate.id === clip.assetId && isOnlineMediaAsset(candidate),
+        )
+        if (!onlineAsset || !isOnlineMediaAsset(onlineAsset)) return false
+        setOnlineFrameRingAsset(
+          onlineAsset as OnlineVideoAddCandidate['asset'],
+        )
+      } else {
+        setOnlineFrameRingAsset(null)
+      }
+      if (source.type === 'frame') {
+        const frame = clip.indexedFrames.find(
+          (candidate) => candidate.id === source.frameId,
+        )
+        if (!frame) return false
+        setFrameRingFocusTarget({
+          clipId: clip.id,
+          frameId: frame.id,
+          timeSeconds: frame.timeSeconds,
+          requestId: Date.now(),
+          intent: 'preview',
+        })
+      } else {
+        setFrameRingFocusTarget(null)
+      }
+      setHoveredClipId(null)
+      setQuery('')
+      setActiveNav('project-details')
+      setSearchOpen(false)
+      transitionToView('frame-ring')
+      return true
+    }
+
+    const asset = mediaAssetsRef.current.find(
+      (candidate) => candidate.id === source.assetId,
+    )
+    if (!asset || !isOnlineMediaAsset(asset)) return false
+    const onlineAsset = asset as OnlineVideoAddCandidate['asset']
+    const reference = projectAssetRefsRef.current.find(
+      (candidate) => candidate.assetId === onlineAsset.id,
+    )
+    if (reference) {
+      const projectIndex = projects.findIndex(
+        (project) => project.id === reference.projectId,
+      )
+      if (projectIndex >= 0) {
+        setActiveIndex(projectIndex)
+        setSelectedProjectId(reference.projectId)
+      }
+      setSelectedClipId(reference.id)
+    } else {
+      setSelectedClipId(null)
+    }
+    setOnlineFrameRingAsset(onlineAsset)
+    setFrameRingFocusTarget(null)
+    setHoveredClipId(null)
+    setQuery('')
+    setActiveNav('project-details')
+    setSearchOpen(false)
+    transitionToView('frame-ring')
+    return true
   }
 
   function cycleClipColorPreset(clip: VideoClip) {
@@ -10767,7 +11141,12 @@ function App() {
         <span className="cardLight" />
         <span className="cardImage" />
         <span className="cardFrame" />
-        <span className="cardCopy" aria-hidden="true">
+        <span
+          key={`card-copy:${windowsTextRasterRevision}`}
+          className="cardCopy"
+          data-raster-revision={windowsTextRasterRevision}
+          aria-hidden="true"
+        >
           <strong>{project.title}</strong>
           <em className={project.subtitle.trim() ? undefined : 'isEmpty'}>
             {project.subtitle}
@@ -11059,10 +11438,21 @@ function App() {
     releaseDuration,
   ])
 
+  /*
+   * Freeze the outgoing scene so its final frame leaves as one stable
+   * composition. The incoming scene must paint during the 440ms enter phase;
+   * otherwise a cold WebGL/Three.js layer appears only after the DOM motion.
+   */
+  const pageSceneSuspended = pageTransitionPhase === 'exiting'
+
   return (
     <main
       className={`auroraApp view-${currentView} pageTransition${pageTransitionDirection === 'deeper' ? 'Deeper' : 'Shallower'} ${hasPageTransitioned ? 'hasPageTransitioned' : ''} ${pageTransitionPhase === 'exiting' ? 'isPageExiting' : ''} ${pageTransitionPhase === 'entering' ? 'isPageEntering' : ''} ${hasPageColorGrade ? 'hasPageColorGrade' : ''} ${isCameraDragging ? 'isCameraDragging' : ''}`}
       style={stageStyle}
+      data-platform={appPlatform}
+      data-windows-text-raster-revision={
+        appPlatform === 'win32' ? windowsTextRasterRevision : undefined
+      }
       data-startup-locked={startupGateActive || undefined}
       aria-busy={startupGateActive}
       {...cameraGesture}
@@ -11118,7 +11508,7 @@ function App() {
       )}
       <GalleryReflectionCanvas
         active={currentView === 'gallery'}
-        suspended={pageTransitionPhase !== 'idle'}
+        suspended={pageSceneSuspended}
         stageRef={projectStageRef}
         projects={galleryReflectionProjects}
         preloadProjects={galleryReflectionPreloadProjects}
@@ -11148,7 +11538,7 @@ function App() {
       <VideoLibraryReflectionCanvas
         active={currentView === 'video-library'}
         sourceDomAvailable={videoLibraryMounted}
-        suspended={pageTransitionPhase !== 'idle'}
+        suspended={pageSceneSuspended}
         clips={visibleProjectClips}
         preloadClips={videoReflectionPreloadClips}
         detailClip={detailClip}
@@ -11165,7 +11555,7 @@ function App() {
       <VideoLibraryReflectionCanvas
         active={currentView === 'model-library'}
         sourceDomAvailable={Boolean(modelLibraryProject)}
-        suspended={pageTransitionPhase !== 'idle'}
+        suspended={pageSceneSuspended}
         clips={modelReflectionClips}
         detailClip={modelReflectionDetail ?? undefined}
         materialTint={modelLibraryPageSettings.materialTint}
@@ -11227,6 +11617,20 @@ function App() {
           />
         )}
       </div>
+      <FavoritesGalleryView
+        active={currentView === 'favorites'}
+        items={favoriteGalleryItems}
+        cameraYaw={cameraPose.yaw}
+        cameraPitch={cameraPose.pitch}
+        suspended={pageSceneSuspended}
+        materialTint={pageSettings.favorites.materialTint}
+        pedestalTint={pageSettings.favorites.pedestalTint}
+        surfaceData={reflectionSurfaces.favorites}
+        layoutSignal={`${viewportWidth}|${viewportHeight}|${responsiveMetrics.layoutScale}|${responsiveMetrics.planeLeft}|${responsiveMetrics.planeTop}`}
+        textRasterRevision={windowsTextRasterRevision}
+        onToggleFavorite={toggleFavoriteGalleryItem}
+        onOpenItem={openFavoriteGalleryItem}
+      />
       <header className="brandHeader" aria-label="Aurora">
         <img
           className="brandHeaderLogoMark"
@@ -11248,10 +11652,11 @@ function App() {
         </span>
       </header>
 
-      <aside
-        className="sideDock uiGlassShell"
-        aria-label="主导航"
-      >
+      <span
+        className="sideDockGlassBackdrop uiGlassShell"
+        aria-hidden="true"
+      />
+      <aside className="sideDock" aria-label="主导航">
         <nav className="dockNav">
           {navItems.map((item) => {
             const Icon = item.icon
@@ -11365,6 +11770,7 @@ function App() {
           showProjectSettings={
             PAGE_VISUAL_CAPABILITIES[currentView].projectDetails
           }
+          showPedestalTint={currentView === 'favorites'}
           showMediaSourceSettings={currentView === 'online-search'}
           showAiSearchSettings={currentView === 'online-search'}
           aiVisionProfiles={aiServiceProfilesState.visionProfiles}
@@ -11456,8 +11862,10 @@ function App() {
             inert={currentView !== 'gallery'}
             aria-label="项目库简介"
           >
-            <h1>项目库</h1>
-            <p>探索、管理和检索您的影像与三维资产</p>
+            <h1 key={`gallery-title:${windowsTextRasterRevision}`}>项目库</h1>
+            <p key={`gallery-subtitle:${windowsTextRasterRevision}`}>
+              探索、管理和检索您的影像与三维资产
+            </p>
             <span aria-hidden="true" />
           </section>
 
@@ -11665,7 +12073,7 @@ function App() {
         {storageStats.map((item) => {
           const Icon = item.icon
           return (
-            <span key={item.label}>
+            <span key={`${item.label}:${windowsTextRasterRevision}`}>
               <Icon size={17} strokeWidth={1.55} />
               {item.label}
             </span>
@@ -11688,7 +12096,12 @@ function App() {
         }}
       >
         <Plus size={17} strokeWidth={1.7} />
-        新建项目
+        <span
+          key={`create-project-label:${windowsTextRasterRevision}`}
+          className="createProjectButtonLabel"
+        >
+          新建项目
+        </span>
       </button>
       </>
 
@@ -12030,11 +12443,21 @@ function App() {
                 }),
               )}
             </div>
-            {projectClips.length > 0 && filteredProjectClips.length === 0 && (
-              <div
-                className="modelLibraryEmptyState videoProjectFilteredEmptyState"
-                data-camera-gesture="block"
-              >
+            <div
+              className="modelLibraryEmptyState videoProjectFilteredEmptyState"
+              data-camera-gesture="block"
+              data-empty-visible={
+                projectClips.length > 0 && filteredProjectClips.length === 0
+              }
+              aria-hidden={
+                projectClips.length > 0 && filteredProjectClips.length === 0
+                  ? undefined
+                  : true
+              }
+              inert={
+                !(projectClips.length > 0 && filteredProjectClips.length === 0)
+              }
+            >
                 <ListFilter size={24} strokeWidth={1.35} aria-hidden="true" />
                 <strong>没有符合条件的视频</strong>
                 <small>可以调整筛选条件，或清除搜索关键词后重试。</small>
@@ -12046,15 +12469,16 @@ function App() {
                   <RefreshCw size={14} strokeWidth={1.6} />
                   重置搜索与筛选
                 </button>
-              </div>
-            )}
+            </div>
           </div>
 
-          {projectClips.length === 0 && (
-            <div
-              className="modelLibraryEmptyState videoProjectEmptyState"
-              data-camera-gesture="block"
-            >
+          <div
+            className="modelLibraryEmptyState videoProjectEmptyState"
+            data-camera-gesture="block"
+            data-empty-visible={projectClips.length === 0}
+            aria-hidden={projectClips.length === 0 ? undefined : true}
+            inert={projectClips.length !== 0}
+          >
               <Video size={24} strokeWidth={1.35} aria-hidden="true" />
               <strong>这个视频项目还没有素材</strong>
               <small>
@@ -12068,8 +12492,7 @@ function App() {
                 <Plus size={14} strokeWidth={1.6} />
                 导入视频素材
               </button>
-            </div>
-          )}
+          </div>
 
           <footer className="videoLibraryCount">
             {filteredProjectClips.length === projectClips.length
@@ -12468,8 +12891,10 @@ function App() {
         <ModelLibraryView
           active={
             currentView === 'model-library' &&
-            selectedProject.id === modelLibraryProject.id
+            (startupGateActive ||
+              selectedProject.id === modelLibraryProject.id)
           }
+          pageTransitionPhase={pageTransitionPhase}
           project={modelLibraryProject}
           models={modelLibraryModels}
           layout={videoLibraryLayout}
@@ -12517,7 +12942,7 @@ function App() {
               frameRingClip.id === externalFrameRingClip?.id ||
               frameRingClip.id === onlineFrameRingClip?.id)
           }
-          suspended={pageTransitionPhase !== 'idle'}
+          suspended={pageSceneSuspended}
           project={frameRingProject}
           clip={frameRingClip}
           relatedClips={frameRingRelatedClips}
@@ -12630,7 +13055,7 @@ function App() {
 
       <DiscoveryView
         active={currentView === 'online-search'}
-        suspended={pageTransitionPhase !== 'idle'}
+        suspended={pageSceneSuspended}
         cameraYaw={cameraPose.yaw}
         cameraPitch={cameraPose.pitch}
         isCameraDragging={isCameraDragging}
@@ -13962,6 +14387,9 @@ function App() {
         canWarmFrameRing={Boolean(
           startupFrameRingClip,
         )}
+        canWarmModelLibrary={Boolean(modelLibraryProject)}
+        canWarmFavorites={favoriteGalleryItems.length > 0}
+        modelLibraryReflectionRequired={modelLibraryModels.length > 0}
         onWarmupViewChange={setCurrentView}
         onEntryStart={handleStartupEntryStart}
         onEntered={handleStartupEntered}

@@ -37,6 +37,7 @@ export type PageVisualSettings = {
   hue: number
   uiBorderColor: string
   materialTint: string
+  pedestalTint: string
   particles: HomeParticleSettings
 }
 
@@ -86,6 +87,7 @@ export type PageSettingsPanelProps = {
   pageLabel: string
   showParticleSettings: boolean
   showProjectSettings: boolean
+  showPedestalTint?: boolean
   showMediaSourceSettings?: boolean
   showAiSearchSettings?: boolean
   projectName?: string
@@ -646,6 +648,7 @@ export function PageSettingsPanel({
   pageLabel,
   showParticleSettings,
   showProjectSettings,
+  showPedestalTint = false,
   showMediaSourceSettings = false,
   showAiSearchSettings = false,
   projectName,
@@ -1149,6 +1152,23 @@ export function PageSettingsPanel({
               />
             </span>
           </label>
+
+          {showPedestalTint && (
+            <label className="pageSettingsColorControl">
+              <span>底座染色</span>
+              <span className="pageSettingsColorValue">
+                <code>{settings.pedestalTint.toUpperCase()}</code>
+                <input
+                  type="color"
+                  value={settings.pedestalTint}
+                  aria-label="底座染色"
+                  onChange={(event) =>
+                    onChange({ pedestalTint: event.currentTarget.value })
+                  }
+                />
+              </span>
+            </label>
+          )}
         </section>
 
         {showParticleSettings && (

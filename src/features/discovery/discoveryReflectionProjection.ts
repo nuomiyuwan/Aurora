@@ -97,6 +97,14 @@ const parseIndividualScale = (value: string) => {
   return new THREE.Matrix4().makeScale(scaleX, scaleY, scaleZ)
 }
 
+const parseCssZoom = (value: string) => {
+  const source = value.trim()
+  if (!source || source === 'normal') return 1
+  const parsed = Number.parseFloat(source)
+  if (!Number.isFinite(parsed) || parsed <= 0) return 1
+  return source.endsWith('%') ? parsed / 100 : parsed
+}
+
 const parseElementTransform = (style: CSSStyleDeclaration) => {
   const transform = parseCssTransform(style.transform)
   const scale = parseIndividualScale(style.getPropertyValue('scale'))
@@ -127,14 +135,18 @@ const createProjectionContext = (
   const planeOffset = readLayoutOffset(plane, root)
   const parsedPlaneTransform = parseElementTransform(planeStyle)
   if (!planeOffset || !parsedPlaneTransform) return null
+  const planeZoom = parseCssZoom(planeStyle.zoom)
   const planeOrigin = parseTransformOrigin(
     planeStyle.transformOrigin || '0 0',
     planeWidth,
     planeHeight,
   )
-  const planeMatrix = translation(planeOffset.x, planeOffset.y).multiply(
-    composeAroundOrigin(parsedPlaneTransform, planeOrigin),
+  const planeMatrix = translation(
+    planeOffset.x * planeZoom,
+    planeOffset.y * planeZoom,
   )
+    .multiply(new THREE.Matrix4().makeScale(planeZoom, planeZoom, planeZoom))
+    .multiply(composeAroundOrigin(parsedPlaneTransform, planeOrigin))
 
   const spatialStyle = getComputedStyle(spatialStage)
   const spatialWidth = Math.max(

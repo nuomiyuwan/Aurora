@@ -6,15 +6,20 @@ import {
   type CSSProperties,
 } from 'react'
 import { resolveDocumentAssetUrl } from '../../documentAssetUrl'
-import { PAGE_TRANSITION_EXIT_MS } from '../../pageTransition'
+import {
+  PAGE_TRANSITION_ENTER_MS,
+  PAGE_TRANSITION_EXIT_MS,
+} from '../../pageTransition'
 import { StartupReflectionCanvas } from './StartupReflectionCanvas'
 import './StartupGate.css'
 
 export type StartupWarmupView =
   | 'gallery'
   | 'video-library'
+  | 'model-library'
   | 'frame-ring'
   | 'online-search'
+  | 'favorites'
 
 export type StartupLibraryState = 'loading' | 'ready' | 'failed'
 
@@ -24,6 +29,9 @@ interface StartupGateProps {
   libraryState: StartupLibraryState
   mediaUrls: readonly string[]
   canWarmFrameRing: boolean
+  canWarmModelLibrary: boolean
+  canWarmFavorites: boolean
+  modelLibraryReflectionRequired: boolean
   onWarmupViewChange: (view: StartupWarmupView) => void
   onEntryStart: () => void
   onEntered: () => void
@@ -36,9 +44,12 @@ type WarmupStep = {
   view: StartupWarmupView
   label: string
   reflectionSelector: string
+  reflectionRequired?: boolean
   glassSelector?: string
   glassCacheRequired?: boolean
   geometrySelector?: string
+  auxiliaryRendererSelector?: string
+  prepaintSelector?: string
   preloadRequired?: boolean
   enabled: boolean
   timeoutMs: number
@@ -104,6 +115,11 @@ const AURORA_STARTUP_VISUAL_ASSETS = [
   './aurora/particles/leaf.png',
   './aurora/particles/snowflake.png',
   './aurora/particles/maple-leaf.png',
+] as const
+
+const FAVORITES_STARTUP_VISUAL_ASSETS = [
+  './aurora/favorites-gallery-background.png',
+  './aurora/favorites-pedestal-edge-light.png',
 ] as const
 
 class StartupAbortError extends Error {
@@ -402,6 +418,7 @@ const waitForReflectionFirstFrame = async (
 const warmGlassAndCompositor = async (
   step: WarmupStep,
   signal: AbortSignal,
+  retainedPromotions?: Map<HTMLElement, string>,
 ) => {
   if (step.glassSelector) {
     await waitForCondition(
@@ -419,31 +436,86 @@ const warmGlassAndCompositor = async (
     )
   }
 
+  const warmSurfaceSelector = [
+    '.uiGlassShell',
+    '.galleryProjectProjectedGlass',
+    '.videoClipProjectedGlass',
+    '.videoDetailProjectedGlass',
+    '.frameRingPreviewControlsProjectedGlass',
+    '.frameRingProjectedGlass',
+    '.frameRingActionProjectedGlass',
+    '.discoveryDetailProjectedGlass',
+    step.prepaintSelector,
+  ]
+    .filter(Boolean)
+    .join(',')
   const visibleGlass = Array.from(
     document.querySelectorAll<HTMLElement>(
-      [
-        '.uiGlassShell',
-        '.galleryProjectProjectedGlass',
-        '.videoClipProjectedGlass',
-        '.videoDetailProjectedGlass',
-        '.frameRingPreviewControlsProjectedGlass',
-        '.frameRingProjectedGlass',
-        '.frameRingActionProjectedGlass',
-        '.discoveryDetailProjectedGlass',
-      ].join(','),
+      warmSurfaceSelector,
     ),
   ).filter((element) => {
     const style = window.getComputedStyle(element)
     return style.display !== 'none' && style.visibility !== 'hidden'
   })
 
+  const explicitPrepaintSurfaces = step.prepaintSelector
+    ? Array.from(
+        document.querySelectorAll<HTMLElement>(step.prepaintSelector),
+      ).filter((element) => {
+        const style = window.getComputedStyle(element)
+        return (
+          style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          element.getBoundingClientRect().width > 0 &&
+          element.getBoundingClientRect().height > 0
+        )
+      })
+    : []
+  if (step.prepaintSelector && explicitPrepaintSurfaces.length === 0) {
+    throw new StartupTimeoutError(
+      `No visible prepaint surface for ${step.view}`,
+    )
+  }
+
+  const previousWillChange = new Map<HTMLElement, string>()
   visibleGlass.forEach((element) => {
     element.getBoundingClientRect()
     const style = window.getComputedStyle(element)
     void style.backdropFilter
     void style.getPropertyValue('-webkit-backdrop-filter')
+    const backdropFilter =
+      style.backdropFilter ||
+      style.getPropertyValue('-webkit-backdrop-filter')
+    if (backdropFilter && backdropFilter !== 'none') {
+      previousWillChange.set(element, element.style.willChange)
+      element.style.willChange = 'backdrop-filter'
+    }
   })
-  await waitForPaintFrames(3, signal)
+  try {
+    await waitForPaintFrames(4, signal)
+    visibleGlass.forEach((element) => {
+      const style = window.getComputedStyle(element)
+      void style.backdropFilter
+      void style.getPropertyValue('-webkit-backdrop-filter')
+    })
+    await waitForPaintFrames(2, signal)
+  } finally {
+    if (retainedPromotions) {
+      previousWillChange.forEach((willChange, element) => {
+        if (!retainedPromotions.has(element)) {
+          retainedPromotions.set(element, willChange)
+        }
+      })
+    } else {
+      previousWillChange.forEach((willChange, element) => {
+        if (willChange) element.style.willChange = willChange
+        else element.style.removeProperty('will-change')
+      })
+    }
+  }
+  new Set([...visibleGlass, ...explicitPrepaintSurfaces]).forEach((element) => {
+    element.dataset.startupGlassPrepared = 'true'
+  })
 }
 
 const waitForReflectionPreload = async (
@@ -508,6 +580,37 @@ const waitForGeometryCache = async (
   )
 }
 
+const waitForAuxiliaryRenderer = async (
+  step: WarmupStep,
+  signal: AbortSignal,
+) => {
+  if (!step.auxiliaryRendererSelector) return
+  await waitForCondition(
+    () => {
+      const canvas = document.querySelector<HTMLCanvasElement>(
+        step.auxiliaryRendererSelector!,
+      )
+      return (
+        canvas?.dataset.assetReady === 'true' &&
+        canvas.dataset.pedestalReady === 'true' &&
+        canvas.dataset.reflectionReady === 'true' &&
+        canvas.dataset.cardDepthOcclusionReady === 'true' &&
+        canvas.dataset.cardReflectionOcclusionReady === 'true' &&
+        ['true', 'fallback'].includes(
+          canvas.dataset.reflectionSurfaceReady ?? '',
+        ) &&
+        ['true', 'fallback'].includes(
+          canvas.dataset.environmentReady ?? '',
+        ) &&
+        canvas.dataset.renderState === 'ready'
+      )
+    },
+    Math.min(step.timeoutMs, 8_000),
+    signal,
+    `Timed out warming auxiliary renderer for ${step.view}`,
+  )
+}
+
 const uniqueVisualUrls = (mediaUrls: readonly string[]) =>
   Array.from(
     new Set(
@@ -534,6 +637,9 @@ export function StartupGate({
   libraryState,
   mediaUrls,
   canWarmFrameRing,
+  canWarmModelLibrary,
+  canWarmFavorites,
+  modelLibraryReflectionRequired,
   onWarmupViewChange,
   onEntryStart,
   onEntered,
@@ -552,6 +658,11 @@ export function StartupGate({
   const libraryStateRef = useRef(libraryState)
   const mediaUrlsRef = useRef(mediaUrls)
   const canWarmFrameRingRef = useRef(canWarmFrameRing)
+  const canWarmModelLibraryRef = useRef(canWarmModelLibrary)
+  const canWarmFavoritesRef = useRef(canWarmFavorites)
+  const modelLibraryReflectionRequiredRef = useRef(
+    modelLibraryReflectionRequired,
+  )
   const enterButtonRef = useRef<HTMLButtonElement>(null)
   const startupGateRef = useRef<HTMLElement>(null)
   const startupBackgroundRef = useRef<HTMLImageElement>(null)
@@ -559,7 +670,13 @@ export function StartupGate({
   const startupLogoPosterRef = useRef<HTMLImageElement>(null)
   const startupLogoVideoRef = useRef<HTMLVideoElement>(null)
   const retainedImagesRef = useRef<HTMLImageElement[]>([])
+  const retainedGlassPromotionsRef = useRef<Map<HTMLElement, string>>(
+    new Map(),
+  )
   const exitTimerRef = useRef<number | undefined>(undefined)
+  const glassPromotionReleaseTimerRef = useRef<number | undefined>(
+    undefined,
+  )
   const enteredRef = useRef(false)
   const backgroundSettledRef = useRef(false)
   const logoPosterSettledRef = useRef(false)
@@ -569,9 +686,23 @@ export function StartupGate({
     window.matchMedia('(prefers-reduced-motion: reduce)').matches,
   )
 
+  const releaseRetainedGlassPromotions = useCallback(() => {
+    retainedGlassPromotionsRef.current.forEach((willChange, element) => {
+      if (!element.isConnected) return
+      if (willChange) element.style.willChange = willChange
+      else element.style.removeProperty('will-change')
+    })
+    retainedGlassPromotionsRef.current.clear()
+    glassPromotionReleaseTimerRef.current = undefined
+  }, [])
+
   libraryStateRef.current = libraryState
   mediaUrlsRef.current = mediaUrls
   canWarmFrameRingRef.current = canWarmFrameRing
+  canWarmModelLibraryRef.current = canWarmModelLibrary
+  canWarmFavoritesRef.current = canWarmFavorites
+  modelLibraryReflectionRequiredRef.current =
+    modelLibraryReflectionRequired
 
   const settleStartupBackground = useCallback(
     (outcome: Exclude<StartupBackgroundState, 'loading'>) => {
@@ -710,12 +841,24 @@ export function StartupGate({
     onEntryStart()
     setPhase('leaving')
     setStatus('正在进入 Aurora')
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    const reducedMotion = window.matchMedia(
+      '(prefers-reduced-motion: reduce)',
+    ).matches
+    if (glassPromotionReleaseTimerRef.current !== undefined) {
+      window.clearTimeout(glassPromotionReleaseTimerRef.current)
+    }
+    glassPromotionReleaseTimerRef.current = window.setTimeout(
+      releaseRetainedGlassPromotions,
+      reducedMotion
+        ? 96
+        : EXIT_FALLBACK_MS + PAGE_TRANSITION_ENTER_MS + 120,
+    )
+    if (reducedMotion) {
       finishEntry()
       return
     }
     exitTimerRef.current = window.setTimeout(finishEntry, EXIT_FALLBACK_MS)
-  }, [finishEntry, onEntryStart, phase])
+  }, [finishEntry, onEntryStart, phase, releaseRetainedGlassPromotions])
 
   useEffect(() => {
     if (!enabled) return
@@ -776,6 +919,81 @@ export function StartupGate({
       controller.abort()
     }, STARTUP_HARD_TIMEOUT_MS)
 
+    const steps: WarmupStep[] = [
+      {
+        view: 'gallery',
+        label: '正在预热主页倒影',
+        reflectionSelector: '.galleryReflectionCanvas',
+        glassSelector: '.galleryProjectedGlassLayer',
+        glassCacheRequired: true,
+        geometrySelector: '.galleryProjectedGlassLayer',
+        preloadRequired: true,
+        enabled: true,
+        timeoutMs: 15_000,
+      },
+      {
+        view: 'video-library',
+        label: '正在预热素材库',
+        reflectionSelector: '.videoLibraryReflectionCanvas',
+        glassSelector: '.videoLibraryProjectedGlassLayer',
+        glassCacheRequired: true,
+        geometrySelector: '.videoLibraryProjectedGlassLayer',
+        prepaintSelector:
+          '.videoProjectEmptyState, .videoProjectFilteredEmptyState',
+        preloadRequired: true,
+        enabled: true,
+        timeoutMs: 18_000,
+      },
+      {
+        view: 'model-library',
+        label: '正在预热三维素材库',
+        reflectionSelector: '.modelLibraryReflectionCanvas',
+        reflectionRequired: modelLibraryReflectionRequiredRef.current,
+        glassSelector: '.modelLibraryProjectedGlassLayer',
+        glassCacheRequired: true,
+        geometrySelector: '.modelLibraryProjectedGlassLayer',
+        prepaintSelector: '.modelLibraryEmptyState',
+        get enabled() {
+          return canWarmModelLibraryRef.current
+        },
+        timeoutMs: 18_000,
+      },
+      {
+        view: 'frame-ring',
+        label: '正在预热帧环',
+        reflectionSelector: '.frameRingReflectionCanvas',
+        glassSelector: '.frameRingProjectedGlassLayer',
+        geometrySelector: '.frameRingHitLayer',
+        preloadRequired: true,
+        get enabled() {
+          return canWarmFrameRingRef.current
+        },
+        timeoutMs: 20_000,
+      },
+      {
+        view: 'online-search',
+        label: '正在预热探索空间',
+        reflectionSelector: '.discoveryReflectionCanvas',
+        prepaintSelector:
+          '.discoverySearchBar, .discoveryDetailWarmupGlass',
+        enabled: true,
+        timeoutMs: 5_500,
+      },
+      {
+        view: 'favorites',
+        label: '正在预热收藏展馆',
+        reflectionSelector: '.favoritesReflectionCanvas',
+        auxiliaryRendererSelector: '.favoritesPedestalCanvas',
+        prepaintSelector:
+          '.favoritesGalleryFilters, .favoritesGalleryPager, .favoritesGalleryPager button',
+        preloadRequired: true,
+        get enabled() {
+          return canWarmFavoritesRef.current
+        },
+        timeoutMs: 12_000,
+      },
+    ]
+
     const warmup = async () => {
       try {
         setStatus('正在读取项目资料')
@@ -811,7 +1029,10 @@ export function StartupGate({
         completeWeight(6)
 
         setStatus('正在解码视觉素材')
-        const visualUrls = uniqueVisualUrls(mediaUrlsRef.current)
+        const visualUrls = uniqueVisualUrls([
+          ...mediaUrlsRef.current,
+          ...FAVORITES_STARTUP_VISUAL_ASSETS,
+        ])
         let cursor = 0
         let settled = 0
         const worker = async () => {
@@ -846,59 +1067,18 @@ export function StartupGate({
         )
         completeWeight(34)
 
-        const steps: WarmupStep[] = [
-          {
-            view: 'gallery',
-            label: '正在预热主页倒影',
-            reflectionSelector: '.galleryReflectionCanvas',
-            glassSelector: '.galleryProjectedGlassLayer',
-            glassCacheRequired: true,
-            geometrySelector: '.galleryProjectedGlassLayer',
-            preloadRequired: true,
-            enabled: true,
-            timeoutMs: 15_000,
-          },
-          {
-            view: 'video-library',
-            label: '正在预热素材库',
-            reflectionSelector: '.videoLibraryReflectionCanvas',
-            glassSelector: '.videoLibraryProjectedGlassLayer',
-            glassCacheRequired: true,
-            geometrySelector: '.videoLibraryProjectedGlassLayer',
-            preloadRequired: true,
-            enabled: true,
-            timeoutMs: 18_000,
-          },
-          {
-            view: 'frame-ring',
-            label: '正在预热帧环',
-            reflectionSelector: '.frameRingReflectionCanvas',
-            glassSelector: '.frameRingProjectedGlassLayer',
-            geometrySelector: '.frameRingHitLayer',
-            preloadRequired: true,
-            enabled: canWarmFrameRingRef.current,
-            timeoutMs: 20_000,
-          },
-          {
-            view: 'online-search',
-            label: '正在预热探索空间',
-            reflectionSelector: '.discoveryReflectionCanvas',
-            glassSelector: '.discoveryProjectedGlassLayer',
-            enabled: true,
-            timeoutMs: 5_500,
-          },
-        ]
+        const warmupStepWeight = 36 / steps.length
 
         for (const step of steps) {
           throwIfAborted(signal)
           if (!step.enabled) {
-            completeWeight(9)
+            completeWeight(warmupStepWeight)
             continue
           }
           setStatus(step.label)
-          const reflectionBaseline = captureReflectionBaseline(
-            step.reflectionSelector,
-          )
+          const reflectionBaseline = step.reflectionRequired === false
+            ? null
+            : captureReflectionBaseline(step.reflectionSelector)
           onWarmupViewChange(step.view)
           try {
             await waitForCondition(
@@ -911,33 +1091,38 @@ export function StartupGate({
               `Timed out activating ${step.view}`,
             )
             await waitForPaintFrames(2, signal)
-            setWeightedProgress(1)
-            const reflectionReady = await waitForReflectionFirstFrame(
-              step.reflectionSelector,
-              step.timeoutMs,
-              signal,
-              reflectionBaseline,
-            )
-            if (!reflectionReady) {
-              markDegraded(
-                new Error(`${step.view} reflection renderer used fallback`),
+            setWeightedProgress(warmupStepWeight * (1 / 9))
+            if (reflectionBaseline) {
+              const reflectionReady = await waitForReflectionFirstFrame(
+                step.reflectionSelector,
+                step.timeoutMs,
+                signal,
+                reflectionBaseline,
               )
+              if (!reflectionReady) {
+                markDegraded(
+                  new Error(`${step.view} reflection renderer used fallback`),
+                )
+              }
             }
-            setWeightedProgress(3)
+            setWeightedProgress(warmupStepWeight * (3 / 9))
             await waitForReflectionPreload(
               step,
               signal,
               (preloadProgress) =>
-                setWeightedProgress(3 + preloadProgress * 3),
+                setWeightedProgress(
+                  warmupStepWeight * ((3 + preloadProgress * 3) / 9),
+                ),
             )
             await waitForGeometryCache(step, signal)
-            setWeightedProgress(7)
+            await waitForAuxiliaryRenderer(step, signal)
+            setWeightedProgress(warmupStepWeight * (7 / 9))
             await warmGlassAndCompositor(step, signal)
-            setWeightedProgress(8.5)
+            setWeightedProgress(warmupStepWeight * (8.5 / 9))
           } catch (error) {
             markDegraded(error)
           }
-          completeWeight(9)
+          completeWeight(warmupStepWeight)
         }
       } catch (error) {
         markDegraded(error)
@@ -945,25 +1130,12 @@ export function StartupGate({
         window.clearTimeout(hardTimeout)
         if (!disposed) {
           setStatus('正在恢复入口画面')
-          const restoreStep = [
-            {
-              view: 'gallery',
-              reflectionSelector: '.galleryReflectionCanvas',
-            },
-            {
-              view: 'video-library',
-              reflectionSelector: '.videoLibraryReflectionCanvas',
-            },
-            {
-              view: 'frame-ring',
-              reflectionSelector: '.frameRingReflectionCanvas',
-            },
-            {
-              view: 'online-search',
-              reflectionSelector: '.discoveryReflectionCanvas',
-            },
-          ].find((step) => step.view === initialView)
-          const restoreBaseline = restoreStep
+          const restoreStep = steps.find((step) => step.view === initialView)
+          const restoringAlreadyActive =
+            document
+              .querySelector('.auroraApp')
+              ?.classList.contains(`view-${initialView}`) === true
+          const restoreBaseline = restoreStep && !restoringAlreadyActive
             ? captureReflectionBaseline(restoreStep.reflectionSelector)
             : null
           onWarmupViewChange(initialView)
@@ -993,6 +1165,20 @@ export function StartupGate({
                     ),
                   )
                 }
+              }
+              if (restoreStep) {
+                await waitForReflectionPreload(
+                  restoreStep,
+                  signal,
+                  () => undefined,
+                )
+                await waitForGeometryCache(restoreStep, signal)
+                await waitForAuxiliaryRenderer(restoreStep, signal)
+                await warmGlassAndCompositor(
+                  restoreStep,
+                  signal,
+                  retainedGlassPromotionsRef.current,
+                )
               }
             } catch (error) {
               markDegraded(error)
@@ -1028,12 +1214,19 @@ export function StartupGate({
       if (exitTimerRef.current !== undefined) {
         window.clearTimeout(exitTimerRef.current)
       }
+      if (!enteredRef.current) {
+        if (glassPromotionReleaseTimerRef.current !== undefined) {
+          window.clearTimeout(glassPromotionReleaseTimerRef.current)
+        }
+        releaseRetainedGlassPromotions()
+      }
       retainedImagesRef.current = []
     }
   }, [
     enabled,
     initialView,
     onWarmupViewChange,
+    releaseRetainedGlassPromotions,
   ])
 
   if (!enabled) return null

@@ -3245,6 +3245,12 @@ export function DiscoveryView({
       wheelState.active ? wheelState.axis : null,
     )
     if (!sample || (!wheelState.active && !sample.moves)) return
+    /*
+     * WheelEvent delta is the scroll direction, which is opposite the finger
+     * travel used by macOS natural scrolling. Flip it so the authored card
+     * track follows the two-finger gesture just like direct pointer dragging.
+     */
+    const trackpadDelta = -sample.delta
 
     const now = performance.now()
     if (!wheelState.active) {
@@ -3267,7 +3273,7 @@ export function DiscoveryView({
     } else if (sample.moves) {
       const elapsed = Math.max(8, now - wheelState.lastTime)
       const instantVelocity =
-        sample.delta / DISCOVERY_SNAKE_WHEEL_THRESHOLD / elapsed
+        trackpadDelta / DISCOVERY_SNAKE_WHEEL_THRESHOLD / elapsed
       wheelState.velocity = wheelState.hasVelocity
         ? wheelState.velocity * 0.68 + instantVelocity * 0.32
         : instantVelocity
@@ -3284,7 +3290,7 @@ export function DiscoveryView({
       )
       const previousRawPosition = wheelState.rawPosition
       const positionDelta =
-        sample.delta / DISCOVERY_SNAKE_WHEEL_THRESHOLD
+        trackpadDelta / DISCOVERY_SNAKE_WHEEL_THRESHOLD
       wheelState.rawPosition = Math.max(
         0,
         Math.min(
@@ -4664,8 +4670,9 @@ export function DiscoveryView({
     const pointerDelta = axis === 'x'
       ? event.clientX - pointerState.lastX
       : event.clientY - pointerState.lastY
+    /* Direct manipulation: the authored card track follows the pointer. */
     const positionDelta =
-      -pointerDelta / DISCOVERY_SNAKE_WHEEL_THRESHOLD
+      pointerDelta / DISCOVERY_SNAKE_WHEEL_THRESHOLD
     pointerState.lastX = event.clientX
     pointerState.lastY = event.clientY
     pointerState.lastTime = now
@@ -5120,6 +5127,7 @@ export function DiscoveryView({
         aria-hidden="true"
       >
         <span className="discoveryDetailProjectedGlass" />
+        <span className="discoveryDetailWarmupGlass uiGlassShell" />
       </div>
       <section
         ref={discoveryViewRef}

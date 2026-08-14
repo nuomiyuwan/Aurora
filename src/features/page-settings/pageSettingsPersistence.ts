@@ -17,12 +17,14 @@ export const APPEARANCE_PAGE_IDS = [
   'model-library',
   'model-viewer',
   'online-search',
+  'favorites',
 ] as const
 
 export type AppearancePageId = (typeof APPEARANCE_PAGE_IDS)[number]
 
 export const DEFAULT_UI_BORDER_COLOR = '#dcdee4'
 export const DEFAULT_MATERIAL_TINT = '#aec5ff'
+export const DEFAULT_PEDESTAL_TINT = '#555d66'
 export const DEFAULT_PARTICLE_COLOR = '#e4f0ff'
 export const APPEARANCE_SETTINGS_SCHEMA_VERSION = 2
 
@@ -87,6 +89,7 @@ export function createDefaultVisualSettings(): PageVisualSettings {
     hue: PAGE_SETTINGS_RANGE_DEFAULTS.hue,
     uiBorderColor: DEFAULT_UI_BORDER_COLOR,
     materialTint: DEFAULT_MATERIAL_TINT,
+    pedestalTint: DEFAULT_PEDESTAL_TINT,
     particles: {
       shape: 'dot',
       customMedia: null,
@@ -166,6 +169,7 @@ export function serializeAppearanceSettings(
             hue: page.hue,
             uiBorderColor: page.uiBorderColor,
             materialTint: page.materialTint,
+            pedestalTint: page.pedestalTint,
             particles: serializeParticles(page.particles),
           } satisfies PersistedPageVisualSettings,
         ]
@@ -288,6 +292,9 @@ function parsePage(
     materialTint: isHexColor(value.materialTint)
       ? value.materialTint
       : defaults.materialTint,
+    pedestalTint: isHexColor(value.pedestalTint)
+      ? value.pedestalTint
+      : defaults.pedestalTint,
     particles: parseParticles(value.particles, getMediaUrl),
   }
 }

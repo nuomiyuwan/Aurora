@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
   CSSProperties,
   DragEvent as ReactDragEvent,
@@ -7,6 +7,7 @@ import type {
 } from 'react'
 import {
   Box,
+  Check,
   ChevronDown,
   ChevronRight,
   FolderOpen,
@@ -48,6 +49,7 @@ export type ModelImportState = {
 
 type ModelLibraryViewProps = {
   active: boolean
+  pageTransitionPhase: 'idle' | 'exiting' | 'entering'
   project: Project
   models: ModelAsset[]
   layout: ResolvedVideoLibraryLayout
@@ -80,14 +82,48 @@ const MODEL_TAG_MAX_COUNT = 6
 const MODEL_TAG_MAX_LENGTH = 12
 const MODEL_DETAIL_NOTE_MAX_LENGTH = 40
 
-type ModelSort = 'default' | 'size' | 'triangles' | 'materials'
+type ModelFilterMenuId = 'format' | 'size' | 'triangles' | 'materials'
+type ModelFilterState = Record<ModelFilterMenuId, string>
+type ModelFilterOption = { value: string; label: string }
 
-const modelSortLabels: Record<ModelSort, string> = {
-  default: '全部模型',
-  size: '文件大小',
-  triangles: '三角面',
-  materials: '材质数量',
+const MODEL_FILTER_MENU_IDS: readonly ModelFilterMenuId[] = [
+  'format',
+  'size',
+  'triangles',
+  'materials',
+]
+const DEFAULT_MODEL_FILTER_STATE: ModelFilterState = {
+  format: 'all',
+  size: 'all',
+  triangles: 'all',
+  materials: 'all',
 }
+const MODEL_FILTER_OPTIONS = {
+  format: [
+    { value: 'all', label: '全部模型' },
+    { value: 'glb', label: 'GLB' },
+    { value: 'obj', label: 'OBJ' },
+    { value: 'fbx', label: 'FBX' },
+  ],
+  size: [
+    { value: 'all', label: '文件大小' },
+    { value: 'small', label: '小于 10 MB' },
+    { value: 'medium', label: '10–50 MB' },
+    { value: 'large', label: '50 MB 以上' },
+  ],
+  triangles: [
+    { value: 'all', label: '三角面' },
+    { value: 'light', label: '5 万面以内' },
+    { value: 'medium', label: '5–50 万面' },
+    { value: 'heavy', label: '50 万面以上' },
+  ],
+  materials: [
+    { value: 'all', label: '材质数量' },
+    { value: 'none', label: '无材质' },
+    { value: 'single', label: '1 个材质' },
+    { value: 'multiple', label: '2 个及以上' },
+  ],
+} satisfies Record<ModelFilterMenuId, readonly ModelFilterOption[]>
 
 function toCssImageValue(value: string | null) {
   return value ? `url(${JSON.stringify(value)})` : 'none'
@@ -95,6 +131,7 @@ function toCssImageValue(value: string | null) {
 
 export function ModelLibraryView({
   active,
+  pageTransitionPhase,
   project,
   models,
   layout,
@@ -115,7 +152,11 @@ export function ModelLibraryView({
 }: ModelLibraryViewProps) {
   const [query, setQuery] = useState('')
   const [dragging, setDragging] = useState(false)
-  const [sortMode, setSortMode] = useState<ModelSort>('default')
+  const [modelFilters, setModelFilters] = useState<ModelFilterState>({
+    ...DEFAULT_MODEL_FILTER_STATE,
+  })
+  const [openModelFilterMenu, setOpenModelFilterMenu] =
+    useState<ModelFilterMenuId | null>(null)
   const [hoveredModelId, setHoveredModelId] = useState<string | null>(null)
   const [modelMenuId, setModelMenuId] = useState<string | null>(null)
   const [modelRemoveDialogId, setModelRemoveDialogId] = useState<string | null>(null)
@@ -126,37 +167,101 @@ export function ModelLibraryView({
   const [noteDraft, setNoteDraft] = useState('')
   const modelGridRef = useRef<HTMLDivElement>(null)
   const modelHitLayerRef = useRef<HTMLDivElement>(null)
+  const modelToolbarRef = useRef<HTMLDivElement>(null)
   const glassCacheSignatureRef = useRef('')
   const geometryCacheSignatureRef = useRef('')
   const geometrySyncCountRef = useRef(0)
   const filteredModels = useMemo(() => {
     const keyword = query.trim().toLocaleLowerCase()
-    const nextModels = keyword ? models.filter((model) =>
+    let nextModels = keyword ? models.filter((model) =>
       model.filename.toLocaleLowerCase().includes(keyword) ||
       model.format.includes(keyword) ||
       model.tags.some((tag) => tag.toLocaleLowerCase().includes(keyword)),
     ) : [...models]
-    if (sortMode === 'size') {
-      nextModels.sort((left, right) => right.sizeBytes - left.sizeBytes)
-    } else if (sortMode === 'triangles') {
-      nextModels.sort(
-        (left, right) => (right.triangleCount ?? -1) - (left.triangleCount ?? -1),
-      )
-    } else if (sortMode === 'materials') {
-      nextModels.sort(
-        (left, right) => (right.materialCount ?? -1) - (left.materialCount ?? -1),
+    if (modelFilters.format !== 'all') {
+      nextModels = nextModels.filter((model) => model.format === modelFilters.format)
+    }
+    if (modelFilters.size !== 'all') {
+      const tenMegabytes = 10 * 1024 * 1024
+      const fiftyMegabytes = 50 * 1024 * 1024
+      nextModels = nextModels.filter((model) =>
+        modelFilters.size === 'small'
+          ? model.sizeBytes < tenMegabytes
+          : modelFilters.size === 'medium'
+            ? model.sizeBytes >= tenMegabytes && model.sizeBytes < fiftyMegabytes
+            : model.sizeBytes >= fiftyMegabytes,
       )
     }
+    if (modelFilters.triangles !== 'all') {
+      nextModels = nextModels.filter((model) => {
+        if (model.triangleCount === null) return false
+        return modelFilters.triangles === 'light'
+          ? model.triangleCount < 50_000
+          : modelFilters.triangles === 'medium'
+            ? model.triangleCount >= 50_000 && model.triangleCount < 500_000
+            : model.triangleCount >= 500_000
+      })
+    }
+    if (modelFilters.materials !== 'all') {
+      nextModels = nextModels.filter((model) => {
+        if (model.materialCount === null) return false
+        return modelFilters.materials === 'none'
+          ? model.materialCount === 0
+          : modelFilters.materials === 'single'
+            ? model.materialCount === 1
+            : model.materialCount >= 2
+      })
+    }
     return nextModels
-  }, [models, query, sortMode])
+  }, [modelFilters, models, query])
+  const modelFilterControls = MODEL_FILTER_MENU_IDS.map((id) => ({
+    id,
+    label:
+      MODEL_FILTER_OPTIONS[id].find((option) => option.value === modelFilters[id])
+        ?.label ?? MODEL_FILTER_OPTIONS[id][0].label,
+    options: MODEL_FILTER_OPTIONS[id],
+  }))
+  const modelFiltersActive = MODEL_FILTER_MENU_IDS.some(
+    (id) => modelFilters[id] !== DEFAULT_MODEL_FILTER_STATE[id],
+  )
   useLayoutEffect(() => {
     onVisibleModelIdsChange(
       project.id,
       filteredModels.map((model) => model.id),
     )
   }, [filteredModels, onVisibleModelIdsChange, project.id])
+  useEffect(() => {
+    setModelFilters({ ...DEFAULT_MODEL_FILTER_STATE })
+    setOpenModelFilterMenu(null)
+  }, [project.id])
+  useEffect(() => {
+    if (openModelFilterMenu === null) return
+
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target
+      if (
+        target instanceof Node &&
+        modelToolbarRef.current?.contains(target)
+      ) {
+        return
+      }
+      setOpenModelFilterMenu(null)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpenModelFilterMenu(null)
+    }
+
+    window.addEventListener('pointerdown', closeOnOutsidePointer, true)
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      window.removeEventListener('pointerdown', closeOnOutsidePointer, true)
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [openModelFilterMenu])
   const selectedModel =
-    models.find((model) => model.id === selectedModelId) ?? models[0] ?? null
+    filteredModels.find((model) => model.id === selectedModelId) ??
+    filteredModels[0] ??
+    null
   const tagEditorModel =
     models.find((model) => model.id === tagEditorModelId) ?? null
   const noteEditorModel =
@@ -185,6 +290,19 @@ export function ModelLibraryView({
     event.stopPropagation()
     onSelect(modelId)
     setModelMenuId(modelId)
+  }
+
+  const selectModelFilter = (menuId: ModelFilterMenuId, value: string) => {
+    setModelFilters((current) => ({ ...current, [menuId]: value }))
+    setOpenModelFilterMenu(null)
+    setHoveredModelId(null)
+  }
+
+  const resetModelFilters = (clearSearch = false) => {
+    setModelFilters({ ...DEFAULT_MODEL_FILTER_STATE })
+    if (clearSearch) setQuery('')
+    setOpenModelFilterMenu(null)
+    setHoveredModelId(null)
   }
 
   const addModelTag = () => {
@@ -257,6 +375,16 @@ export function ModelLibraryView({
       )
     }
 
+    /*
+     * The complete model page and its App-root projected-glass layer use the
+     * same screen-space page transition. Geometry written while that scale is
+     * in flight would therefore be scaled twice: once when measured and once
+     * again by the target layer. Preserve the stable, unscaled warm cache
+     * during entry, and refresh pointer state only after the page is idle.
+     */
+    if (pageTransitionPhase === 'entering') return
+    if (pageTransitionPhase === 'exiting' && active) return
+
     let frame: number | undefined
     let sampledFrames = 0
     /*
@@ -266,7 +394,7 @@ export function ModelLibraryView({
      * surfaces after it becomes visible. A valid cache only needs one frame
      * to refresh the flat hit layer's active/inactive pointer state.
      */
-    const maxFrames = geometryCacheValid ? 1 : 24
+    const maxFrames = geometryCacheValid ? 1 : active ? 24 : 4
 
     const syncHitTargets = () => {
       const gridRect = grid.getBoundingClientRect()
@@ -382,7 +510,7 @@ export function ModelLibraryView({
         [detailCornerRadius, detailCornerRadius, detailCornerRadius, detailCornerRadius],
       )
       const emptyState = grid.parentElement?.querySelector<HTMLElement>(
-        '.modelLibraryEmptyState',
+        '.modelLibraryEmptyState[data-empty-visible="true"]',
       )
       const emptyGlass = glassLayer.querySelector<HTMLElement>(
         '.modelLibraryEmptyProjectedGlass',
@@ -416,6 +544,7 @@ export function ModelLibraryView({
     glassLayerRef,
     hoveredModelId,
     layout,
+    pageTransitionPhase,
     selectedModelId,
   ])
 
@@ -481,29 +610,77 @@ export function ModelLibraryView({
         )}
       </header>
 
-      <div className="videoLibraryToolbar modelLibraryToolbar" aria-label="模型排序" data-camera-gesture="block">
-        {(Object.keys(modelSortLabels) as ModelSort[]).map((mode) => (
-          <div className="videoLibraryFilterControl" key={mode}>
-            <button
-              className={`videoLibraryFilterButton uiGlassShell uiGlassInteractive ${sortMode === mode ? 'active' : ''}`}
-              type="button"
-              aria-pressed={sortMode === mode}
-              onClick={() => setSortMode(mode)}
-            >
-              <span className="videoLibraryFilterButtonLabel">{modelSortLabels[mode]}</span>
-              <ChevronDown size={13 * layout.sceneScale} strokeWidth={1.5} aria-hidden="true" />
-            </button>
-          </div>
-        ))}
+      <div
+        ref={modelToolbarRef}
+        className="videoLibraryToolbar modelLibraryToolbar"
+        aria-label="模型筛选"
+        data-camera-gesture="block"
+      >
+        {modelFilterControls.map((control) => {
+          const selectedValue = modelFilters[control.id]
+          const menuOpen = openModelFilterMenu === control.id
+          return (
+            <div className="videoLibraryFilterControl" key={control.id}>
+              <button
+                className={`videoLibraryFilterButton uiGlassShell uiGlassInteractive ${
+                  selectedValue !== DEFAULT_MODEL_FILTER_STATE[control.id]
+                    ? 'active'
+                    : ''
+                }`}
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                onClick={() =>
+                  setOpenModelFilterMenu((current) =>
+                    current === control.id ? null : control.id,
+                  )
+                }
+              >
+                <span className="videoLibraryFilterButtonLabel">{control.label}</span>
+                <ChevronDown size={13 * layout.sceneScale} strokeWidth={1.5} aria-hidden="true" />
+              </button>
+              {menuOpen && (
+                <div
+                  className="videoLibraryFilterMenu uiGlassShell"
+                  role="menu"
+                  aria-label={`${control.label}选项`}
+                >
+                  {control.options.map((option) => {
+                    const selected = selectedValue === option.value
+                    return (
+                      <button
+                        className={selected ? 'active' : ''}
+                        key={option.value}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={selected}
+                        onClick={() => selectModelFilter(control.id, option.value)}
+                      >
+                        <span>{option.label}</span>
+                        {selected && (
+                          <Check
+                            size={12 * layout.sceneScale}
+                            strokeWidth={1.7}
+                            aria-hidden="true"
+                          />
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )
+        })}
         <button
-          className={`iconFilterButton uiGlassShell uiGlassInteractive ${query || sortMode !== 'default' ? 'active' : ''}`}
+          className={`iconFilterButton uiGlassShell uiGlassInteractive ${
+            query || modelFiltersActive ? 'active' : ''
+          }`}
           type="button"
-          aria-label="重置模型搜索与排序"
-          disabled={!query && sortMode === 'default'}
-          onClick={() => {
-            setQuery('')
-            setSortMode('default')
-          }}
+          aria-label="重置模型搜索与筛选"
+          title={query || modelFiltersActive ? '重置全部筛选' : '当前没有启用筛选'}
+          disabled={!query && !modelFiltersActive}
+          onClick={() => resetModelFilters(true)}
         >
           <ListFilter size={15 * layout.sceneScale} strokeWidth={1.5} />
         </button>
@@ -511,8 +688,9 @@ export function ModelLibraryView({
 
       <div
         ref={modelGridRef}
-        className="videoClipGrid modelAssetStage"
-        data-camera-gesture={filteredModels.length > 1 ? 'block' : undefined}
+        className={`videoClipGrid modelAssetStage ${
+          openModelFilterMenu ? 'isFilterMenuOpen' : ''
+        }`}
         data-track-scrollable={filteredModels.length > 1}
       >
         <div className="videoClipCameraRig modelAssetCameraRig">
@@ -612,23 +790,31 @@ export function ModelLibraryView({
         </div>
       </div>
 
-      {models.length === 0 && (
-        <div className="modelLibraryEmptyState" data-camera-gesture="block">
+      <div
+        className="modelLibraryEmptyState"
+        data-camera-gesture="block"
+        data-empty-visible={models.length === 0}
+        aria-hidden={models.length === 0 ? undefined : true}
+        inert={models.length !== 0}
+      >
           <Box size={24} strokeWidth={1.35} />
           <strong>这个三维项目还没有模型</strong>
           <small>导入 GLB、OBJ 或 FBX 文件，Aurora 会统一建立模型预览与基础信息。</small>
           <button className="uiGlassInset uiGlassInteractive active" type="button" onClick={() => onImport()}><Plus size={14} />导入三维模型</button>
-        </div>
-      )}
+      </div>
 
-      {models.length > 0 && filteredModels.length === 0 && (
-        <div className="modelLibraryEmptyState" data-camera-gesture="block">
+      <div
+        className="modelLibraryEmptyState"
+        data-camera-gesture="block"
+        data-empty-visible={models.length > 0 && filteredModels.length === 0}
+        aria-hidden={models.length > 0 && filteredModels.length === 0 ? undefined : true}
+        inert={!(models.length > 0 && filteredModels.length === 0)}
+      >
           <Search size={22} strokeWidth={1.35} />
           <strong>没有符合条件的模型</strong>
-          <small>清除搜索关键词后重试。</small>
-          <button className="uiGlassInset uiGlassInteractive" type="button" onClick={() => setQuery('')}>清除搜索</button>
-        </div>
-      )}
+          <small>清除搜索或筛选条件后重试。</small>
+          <button className="uiGlassInset uiGlassInteractive" type="button" onClick={() => resetModelFilters(true)}>清除筛选</button>
+      </div>
 
       {selectedModel && (
         <div className="videoLibraryDetailStage modelLibraryDetailStage">
@@ -667,7 +853,11 @@ export function ModelLibraryView({
                 </div>
                 <div className="detailPanelBody">
                   <div className="detailPreview modelLibraryDetailPreview" style={{ '--clip-cover': toCssImageValue(selectedModel.thumbnail) } as CSSProperties}>
-                    {!selectedModel.thumbnail && <Box size={42} strokeWidth={1.05} />}
+                    {selectedModel.thumbnail ? (
+                      <span className="detailPreviewPoster" aria-hidden="true" />
+                    ) : (
+                      <Box size={42} strokeWidth={1.05} />
+                    )}
                   </div>
                   <section className="clipFacts">
                     <h2>基本信息</h2>

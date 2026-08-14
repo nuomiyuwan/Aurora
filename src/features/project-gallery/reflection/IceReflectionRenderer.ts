@@ -62,6 +62,8 @@ export type IceReflectionRendererOptions = {
   sourceLightAsset?: string
   materialTint?: string
   blendOverlappingSources?: boolean
+  /** Prevent ice displacement from pulling a reflection outside its source silhouette. */
+  lockCompositeToSourceCoverage?: boolean
 }
 
 type ValueUniform<T> = { value: T }
@@ -526,6 +528,9 @@ export class IceReflectionRenderer {
         texelSize: { value: this.#texelSize },
         cameraYaw: this.#cameraYawUniform,
         cameraPitch: this.#cameraPitchUniform,
+        sourceCoverageLock: {
+          value: options.lockCompositeToSourceCoverage ? 1 : 0,
+        },
       },
       transparent: true,
       premultipliedAlpha: true,

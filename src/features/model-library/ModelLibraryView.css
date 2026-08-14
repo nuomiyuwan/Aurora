@@ -51,8 +51,8 @@
   width: calc(98px * var(--detail-ui-scale));
 }
 
-.modelLibraryToolbar .videoLibraryFilterButton[aria-pressed='true'] > svg {
-  transform: rotate(180deg);
+.modelLibraryToolbar .uiGlassInteractive:hover {
+  transform: none;
 }
 
 .modelAssetStage {
@@ -71,6 +71,7 @@
 .modelAssetCard .videoClipImage {
   display: grid;
   place-items: center;
+  background-image: var(--clip-cover);
   background-position: center;
   background-size: cover;
 }
@@ -152,6 +153,16 @@
   padding: calc(26px * var(--detail-ui-scale)) calc(30px * var(--detail-ui-scale));
   text-align: center;
   transform: translate(-50%, -50%);
+}
+
+/* Keep empty and filtered prompts rasterized before their first reveal. */
+.modelLibraryEmptyState[data-empty-visible='false'] {
+  opacity: 0.001;
+  pointer-events: none;
+}
+
+.modelLibraryEmptyState[data-empty-visible='true'] {
+  opacity: 1;
 }
 
 /*

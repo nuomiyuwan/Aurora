@@ -21,6 +21,7 @@ import { ReflectionFrameLoop } from './reflection/ReflectionFrameLoop'
 import {
   sampleDomGallery,
   type DomFloorLock,
+  type DomGallerySnapshot,
 } from './reflection/domCardProjection'
 import { HOME_CARD_UI_LAYOUT_VERSION } from './cardUiLayout'
 import { drawProjectDomReflectionTexture } from './reflection/drawProjectDomReflectionTexture'
@@ -37,6 +38,19 @@ export interface GalleryReflectionCanvasProps {
   cameraPitch: number
   materialTint?: string
   surfaceData?: BackgroundReflectionSurface | null
+  canvasClassName?: string
+  rendererName?: string
+  sourceCapacity?: number
+  sourceContactOverlapPixels?: number
+  sourceLightAsset?: string
+  lockReflectionToSourceCoverage?: boolean
+  textureAssetVersion?: string
+  textureRevisionSalt?: string
+  sampleStage?: (
+    stage: HTMLElement,
+    lockedFloor?: DomFloorLock,
+  ) => DomGallerySnapshot
+  drawReflectionTexture?: typeof drawProjectDomReflectionTexture
 }
 
 const LAYOUT_SETTLE_DURATION_MS = 900
@@ -104,6 +118,16 @@ export function GalleryReflectionCanvas({
   cameraPitch,
   materialTint = '#aec5ff',
   surfaceData = null,
+  canvasClassName = 'galleryReflectionCanvas',
+  rendererName = 'reflection',
+  sourceCapacity = 7,
+  sourceContactOverlapPixels = 1.2,
+  sourceLightAsset = './aurora/home-kuang-light-2k.png',
+  lockReflectionToSourceCoverage = false,
+  textureAssetVersion = 'home-dom-reflection-v8',
+  textureRevisionSalt = `${HOME_PROJECT_COVER_RESOURCE_VERSION}:${HOME_CARD_UI_LAYOUT_VERSION}`,
+  sampleStage = sampleDomGallery,
+  drawReflectionTexture = drawProjectDomReflectionTexture,
 }: GalleryReflectionCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const projectsRef = useRef(projects)
@@ -159,8 +183,7 @@ export function GalleryReflectionCanvas({
       revisions.set(
         project.id,
         JSON.stringify([
-          HOME_PROJECT_COVER_RESOURCE_VERSION,
-          HOME_CARD_UI_LAYOUT_VERSION,
+          textureRevisionSalt,
           materialTint,
           project.id,
           project.cover,
@@ -175,7 +198,7 @@ export function GalleryReflectionCanvas({
       )
     })
     return revisions
-  }, [materialTint, retainedProjects])
+  }, [materialTint, retainedProjects, textureRevisionSalt])
   const contentRevision = useMemo(
     () => createReflectionContentRevision(reflectionProjects, textureRevisions),
     [reflectionProjects, textureRevisions],
@@ -256,14 +279,16 @@ export function GalleryReflectionCanvas({
 
         const renderer = createIceReflectionRenderer(canvas, [], {
           onInvalidate: invalidate,
-          sourceCapacity: 7,
-          sourceContactOverlapPixels: 1.2,
+          sourceCapacity,
+          sourceContactOverlapPixels,
           sourceEdgeFadeWidth: 0.0001,
-          sourceLightAsset: './aurora/home-kuang-light-2k.png',
+          sourceLightAsset,
           materialTint: materialTintRef.current,
           blendOverlappingSources: true,
+          lockCompositeToSourceCoverage:
+            lockReflectionToSourceCoverage,
           textureCache: {
-            assetVersion: 'home-dom-reflection-v8',
+            assetVersion: textureAssetVersion,
             createTextureKey: (project, assetVersion) =>
               JSON.stringify([
                 assetVersion,
@@ -271,7 +296,7 @@ export function GalleryReflectionCanvas({
                   JSON.stringify(project),
               ]),
             drawCard: (project, width) =>
-              drawProjectDomReflectionTexture(project, width, {
+              drawReflectionTexture(project, width, {
                 resourceRevision:
                   textureRevisionsRef.current.get(project.id) ?? project.cover,
               }),
@@ -299,7 +324,7 @@ export function GalleryReflectionCanvas({
           const stage = stageRef.current
           if (!stage) return { changed: false, rendered: false }
           const layoutRefreshing = timestamp < layoutRefreshUntil
-          const snapshot = sampleDomGallery(
+          const snapshot = sampleStage(
             stage,
             layoutRefreshing ? undefined : floorLock,
           )
@@ -453,7 +478,17 @@ export function GalleryReflectionCanvas({
         runtimeCleanupRef.current = null
       })
     }
-  }, [runtimeReady, stageRef])
+  }, [
+    drawReflectionTexture,
+    lockReflectionToSourceCoverage,
+    runtimeReady,
+    sampleStage,
+    sourceCapacity,
+    sourceContactOverlapPixels,
+    sourceLightAsset,
+    stageRef,
+    textureAssetVersion,
+  ])
 
   useEffect(() => {
     if (!active || suspended) {
@@ -754,9 +789,10 @@ export function GalleryReflectionCanvas({
   return (
     <canvas
       ref={canvasRef}
-      className="galleryReflectionCanvas"
+      className={canvasClassName}
       data-reflection-active={active}
-      data-aurora-renderer="reflection"
+      data-reflection-coverage-lock={lockReflectionToSourceCoverage}
+      data-aurora-renderer={rendererName}
       data-dpr-cap={String(DOM_REFLECTION_MAX_DPR)}
       data-card-source="full"
       data-render-state="initializing"

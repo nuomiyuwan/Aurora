@@ -172,6 +172,7 @@ uniform sampler2D surfaceDataMap;
 uniform vec2 texelSize;
 uniform float cameraYaw;
 uniform float cameraPitch;
+uniform float sourceCoverageLock;
 
 varying vec2 vUv;
 
@@ -279,7 +280,12 @@ void main() {
       max(shortTapA.a, shortTapB.a)
     )
   );
-  alpha *= smoothstep(0.002, 0.05, warpedCoverage);
+  float outputCoverage = mix(
+    warpedCoverage,
+    anchoredTap.a,
+    clamp(sourceCoverageLock, 0.0, 1.0)
+  );
+  alpha *= smoothstep(0.002, 0.05, outputCoverage);
 
   gl_FragColor = vec4(neutralColor, alpha);
   #include <colorspace_fragment>

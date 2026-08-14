@@ -570,6 +570,21 @@ input:focus-visible {
   transform: translate(-50%, -50%);
 }
 
+.sideDockGlassBackdrop {
+  position: absolute;
+  z-index: 11;
+  top: calc(
+    var(--layout-plane-top) +
+    (var(--layout-plane-height) - 700px * var(--layout-scale)) / 2
+  );
+  left: calc(var(--layout-plane-left) + 32px * var(--layout-scale));
+  box-sizing: border-box;
+  width: calc(48px * var(--layout-scale));
+  height: calc(700px * var(--layout-scale));
+  border-radius: calc(14px * var(--layout-scale));
+  pointer-events: none;
+}
+
 .sideDock {
   position: absolute;
   z-index: 12;
@@ -586,6 +601,7 @@ input:focus-visible {
   align-items: center;
   gap: 13px;
   border: 1px solid transparent;
+  background: transparent;
   border-radius: 14px;
   padding-bottom: 13px;
   scale: var(--layout-scale);
@@ -1996,8 +2012,9 @@ input:focus-visible {
 
 .galleryProjectedGlassLayer:not([data-glass-active='true'])
   > .galleryProjectProjectedGlass {
-  visibility: hidden !important;
-  opacity: 0 !important;
+  /* Keep the real backdrop leaves retained after startup prepaint. */
+  visibility: visible !important;
+  opacity: 0.001 !important;
 }
 
 .galleryProjectProjectedGlass {
@@ -2122,8 +2139,8 @@ input:focus-visible {
   --reflection-opacity: 1;
   --reflection-slot-opacity: 1;
   --reflection-light-opacity: 0.82;
+  --card-text-filter: none;
   --card-visual-filter: ;
-  --card-hover-filter: ;
   position: absolute;
   z-index: var(--card-z);
   top: var(--card-top);
@@ -2272,10 +2289,6 @@ input:focus-visible {
   --card-hover-lift: calc(26px * var(--layout-scale));
 }
 
-.projectStage:not(.isDragging):not(.isReleasing):not(.isRecycling) .projectCard.isHitHovered {
-  --card-hover-filter: brightness(1.07) contrast(1.04) drop-shadow(0 0 calc(33px * var(--card-raster-scale)) rgba(150, 186, 255, 0.22));
-}
-
 .projectStage.isDragging .projectHitTarget,
 .projectStage.isReleasing .projectHitTarget {
   cursor: grabbing;
@@ -2293,7 +2306,7 @@ input:focus-visible {
   inset: 0;
   z-index: 8;
   background: url('/aurora/home-kuang-light-2k.png') center / 100% 100% no-repeat;
-  filter: brightness(1.35) contrast(1.05) var(--card-visual-filter) var(--card-hover-filter) var(--asset-ui-tint-filter);
+  filter: brightness(1.35) contrast(1.05) var(--card-visual-filter) var(--asset-ui-tint-filter);
   opacity: 1;
   mix-blend-mode: screen;
   pointer-events: none;
@@ -2318,7 +2331,7 @@ input:focus-visible {
   -webkit-mask-repeat: no-repeat;
   -webkit-mask-size: 100% 100%;
   transform: none;
-  filter: var(--card-visual-filter) var(--card-hover-filter);
+  filter: var(--card-visual-filter);
 }
 
 .projectCard[data-project-empty-glass='true'] .cardImage {
@@ -2339,7 +2352,7 @@ input:focus-visible {
   opacity: 1;
   pointer-events: none;
   transform: none;
-  filter: var(--card-visual-filter) var(--card-hover-filter) var(--asset-ui-tint-filter);
+  filter: var(--card-visual-filter) var(--asset-ui-tint-filter);
 }
 
 .cardCopy {
@@ -2352,7 +2365,7 @@ input:focus-visible {
   color: rgba(246, 247, 250, 0.96);
   font-family: Inter, "Microsoft YaHei", "PingFang SC", sans-serif;
   font-synthesis: none;
-  filter: var(--card-visual-filter);
+  filter: var(--card-text-filter);
   pointer-events: none;
   text-shadow: 0 1.5px 0 rgba(0, 0, 0, 0.78);
   text-rendering: geometricPrecision;
@@ -2402,7 +2415,7 @@ input:focus-visible {
   width: 51px;
   height: 39px;
   color: rgba(224, 230, 240, 0.68);
-  filter: var(--card-visual-filter) var(--card-hover-filter);
+  filter: var(--card-text-filter);
   pointer-events: none;
   place-items: center;
   text-shadow: 0 1.5px 0 rgba(0, 0, 0, 0.78);
@@ -6155,14 +6168,14 @@ input:focus-visible {
   .frameRingProjectedGlass,
   .frameRingActionProjectedGlass
 ) {
-  opacity: 0 !important;
+  opacity: 0.001 !important;
 }
 
 .frameRingProjectedGlassLayer[data-frame-ring-ready='false'] :is(
   .frameRingProjectedGlass,
   .frameRingActionProjectedGlass
 ) {
-  opacity: 0 !important;
+  opacity: 0.001 !important;
 }
 
 .frameRingPreviewControlsProjectedGlass,
@@ -8483,6 +8496,41 @@ input:focus-visible {
   --projected-glass-enter-animation: auroraProjectedGlassEnterDepth;
 }
 
+/*
+ * Every detail page owns perspective inside its scene and intentionally keeps
+ * the App root at `perspective: none`. A translateZ-only page transition is
+ * therefore visually flat on those pages. Use the screen-space equivalent of
+ * the gallery's 3D projection so the complete DOM/WebGL composition still
+ * pushes deeper and pulls shallower without reintroducing nested perspective.
+ */
+.auroraApp:is(
+  .view-video-library,
+  .view-frame-ring,
+  .view-model-library,
+  .view-model-viewer,
+  .view-online-search,
+  .view-favorites
+).pageTransitionDeeper {
+  --page-exit-animation: auroraPageExitDepthReverseFlat;
+  --page-enter-animation: auroraPageEnterDepthReverseFlat;
+  --projected-glass-exit-animation: auroraProjectedGlassExitDepthReverseFlat;
+  --projected-glass-enter-animation: auroraProjectedGlassEnterDepthReverseFlat;
+}
+
+.auroraApp:is(
+  .view-video-library,
+  .view-frame-ring,
+  .view-model-library,
+  .view-model-viewer,
+  .view-online-search,
+  .view-favorites
+).pageTransitionShallower {
+  --page-exit-animation: auroraPageExitDepthFlat;
+  --page-enter-animation: auroraPageEnterDepthFlat;
+  --projected-glass-exit-animation: auroraProjectedGlassExitDepthFlat;
+  --projected-glass-enter-animation: auroraProjectedGlassEnterDepthFlat;
+}
+
 .auroraApp.isPageExiting :is(
   .pageIntro[data-page-active='true'],
   .galleryReflectionCanvas[data-reflection-active='true'],
@@ -8498,7 +8546,8 @@ input:focus-visible {
   .frameRingView[data-page-active='true'],
   .frameRingInfoPortalLayer[data-page-active='true'],
   .discoveryReflectionCanvas[data-reflection-active='true'],
-  .discoveryView[data-page-active='true']
+  .discoveryView[data-page-active='true'],
+  .favoritesGalleryStage[data-page-active='true']
 ) {
   animation-name: var(--page-exit-animation);
   animation-duration: 220ms;
@@ -8506,7 +8555,7 @@ input:focus-visible {
   animation-fill-mode: both;
   backface-visibility: hidden;
   pointer-events: none;
-  will-change: transform, opacity;
+  will-change: transform, scale, opacity;
 }
 
 .auroraApp.isPageEntering :is(
@@ -8524,7 +8573,8 @@ input:focus-visible {
   .frameRingView[data-page-active='true'],
   .frameRingInfoPortalLayer[data-page-active='true'],
   .discoveryReflectionCanvas[data-reflection-active='true'],
-  .discoveryView[data-page-active='true']
+  .discoveryView[data-page-active='true'],
+  .favoritesGalleryStage[data-page-active='true']
 ) {
   animation-name: var(--page-enter-animation);
   animation-duration: 440ms;
@@ -8532,7 +8582,7 @@ input:focus-visible {
   animation-fill-mode: both;
   backface-visibility: hidden;
   pointer-events: none;
-  will-change: transform, opacity;
+  will-change: transform, scale, opacity;
 }
 
 .auroraApp.isPageExiting
@@ -8548,7 +8598,7 @@ input:focus-visible {
   animation-fill-mode: both;
   backface-visibility: hidden;
   pointer-events: none;
-  will-change: transform;
+  will-change: transform, scale;
 }
 
 .auroraApp.isPageEntering
@@ -8564,7 +8614,7 @@ input:focus-visible {
   animation-fill-mode: both;
   backface-visibility: hidden;
   pointer-events: none;
-  will-change: transform;
+  will-change: transform, scale;
 }
 
 .auroraApp.isPageExiting
@@ -8619,13 +8669,21 @@ input:focus-visible {
   will-change: auto;
 }
 
-.auroraApp.isPageExiting .frameRingBottomActions[data-page-active='true'] {
+.auroraApp.isPageExiting :is(
+  .frameRingBottomActions[data-page-active='true'],
+  .modelViewerEnvironmentControl[data-page-active='true'],
+  .favoritesGalleryView[data-page-active='true'] > .favoritesGalleryIntro
+) {
   animation: auroraUiGlassSurfaceFadeOut 220ms cubic-bezier(0.42, 0, 0.78, 0.28) both;
   pointer-events: none;
   will-change: opacity;
 }
 
-.auroraApp.isPageEntering .frameRingBottomActions[data-page-active='true'] {
+.auroraApp.isPageEntering :is(
+  .frameRingBottomActions[data-page-active='true'],
+  .modelViewerEnvironmentControl[data-page-active='true'],
+  .favoritesGalleryView[data-page-active='true'] > .favoritesGalleryIntro
+) {
   animation: auroraUiGlassSurfaceFadeIn 440ms cubic-bezier(0.16, 0.82, 0.2, 1) both;
   pointer-events: none;
   will-change: opacity;
@@ -8696,6 +8754,54 @@ input:focus-visible {
   }
 }
 
+@keyframes auroraPageExitDepthFlat {
+  from {
+    opacity: 1;
+    scale: 1;
+  }
+
+  to {
+    opacity: 0;
+    scale: 0.925;
+  }
+}
+
+@keyframes auroraPageEnterDepthFlat {
+  from {
+    opacity: 0;
+    scale: 1.06;
+  }
+
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+
+@keyframes auroraPageExitDepthReverseFlat {
+  from {
+    opacity: 1;
+    scale: 1;
+  }
+
+  to {
+    opacity: 0;
+    scale: 1.06;
+  }
+}
+
+@keyframes auroraPageEnterDepthReverseFlat {
+  from {
+    opacity: 0;
+    scale: 0.925;
+  }
+
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+
 @keyframes auroraProjectedGlassExitDepth {
   from {
     transform: translate3d(0, 0, 0);
@@ -8733,6 +8839,46 @@ input:focus-visible {
 
   to {
     transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes auroraProjectedGlassExitDepthFlat {
+  from {
+    scale: 1;
+  }
+
+  to {
+    scale: 0.925;
+  }
+}
+
+@keyframes auroraProjectedGlassEnterDepthFlat {
+  from {
+    scale: 1.06;
+  }
+
+  to {
+    scale: 1;
+  }
+}
+
+@keyframes auroraProjectedGlassExitDepthReverseFlat {
+  from {
+    scale: 1;
+  }
+
+  to {
+    scale: 1.06;
+  }
+}
+
+@keyframes auroraProjectedGlassEnterDepthReverseFlat {
+  from {
+    scale: 0.925;
+  }
+
+  to {
+    scale: 1;
   }
 }
 
@@ -8839,15 +8985,15 @@ input:focus-visible {
 }
 
 .auroraApp.hasPageColorGrade .cardLight {
-  filter: brightness(1.35) contrast(1.05) var(--card-visual-filter) var(--card-hover-filter) var(--asset-ui-tint-filter) var(--page-color-grade-filter);
+  filter: brightness(1.35) contrast(1.05) var(--card-visual-filter) var(--asset-ui-tint-filter) var(--page-color-grade-filter);
 }
 
 .auroraApp.hasPageColorGrade .cardImage {
-  filter: var(--card-visual-filter) var(--card-hover-filter) var(--page-color-grade-filter);
+  filter: var(--card-visual-filter) var(--page-color-grade-filter);
 }
 
 .auroraApp.hasPageColorGrade .cardFrame {
-  filter: var(--card-visual-filter) var(--card-hover-filter) var(--asset-ui-tint-filter) var(--page-color-grade-filter);
+  filter: var(--card-visual-filter) var(--asset-ui-tint-filter) var(--page-color-grade-filter);
 }
 
 .auroraApp.hasPageColorGrade .videoClipVisual,
@@ -8912,4 +9058,50 @@ input:focus-visible {
 
 .auroraApp.hasPageColorGrade .frameRingCard.selected .frameRingCardLight {
   filter: brightness(1.0) drop-shadow(0 0 32px rgba(196, 220, 255, 0.42)) var(--asset-ui-tint-filter) var(--page-color-grade-filter);
+}
+
+/*
+ * DirectWrite stays sharp when text remains a paint leaf. On Windows, avoid
+ * retaining no-op filtered card text in an offscreen texture, especially at
+ * 150% and 200% display scaling.
+ */
+.auroraApp[data-platform='win32'] {
+  font-family:
+    "Segoe UI Variable Text",
+    "Segoe UI",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    sans-serif;
+  text-rendering: auto;
+}
+
+.auroraApp[data-platform='win32'] :is(
+  .projectCard,
+  .projectCardRasterSurface
+) {
+  will-change: auto;
+}
+
+.auroraApp[data-platform='win32'] .projectStage:is(
+  .isDragging,
+  .isReleasing,
+  .isRecycling
+) .projectCard {
+  will-change: transform, translate;
+}
+
+.auroraApp[data-platform='win32'] .cardCopy {
+  font-family: inherit;
+  text-rendering: auto;
+}
+
+.auroraApp[data-platform='win32'] :is(
+  .brandHeader,
+  .sideDock,
+  .pageIntro,
+  .topTools,
+  .statusBar,
+  .createProjectButton
+) {
+  animation-fill-mode: backwards;
 }

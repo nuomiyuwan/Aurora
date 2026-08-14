@@ -1,9 +1,6 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
-test('left-button drag follows the Discovery corridor and snaps on release', async ({
-  page,
-}) => {
-  test.setTimeout(60_000)
+async function prepareDiscoveryResults(page: Page) {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await page.goto('/')
   await page.locator('.sideDock button[aria-label="探索"]').click()
@@ -67,13 +64,24 @@ test('left-button drag follows the Discovery corridor and snaps on release', asy
     'data-result-pointer-drag-enabled',
     'true',
   )
+  return discoveryView
+}
+
+test('left-button drag follows the Discovery corridor and snaps on release', async ({
+  page,
+}) => {
+  test.setTimeout(60_000)
+  const discoveryView = await prepareDiscoveryResults(page)
   const selectedHit = page.locator(
     '.discoveryResultCard.selected .discoveryResultHit',
   )
   await expect(selectedHit).toBeVisible()
   const initialId = await selectedHit.getAttribute('data-discovery-result-id')
+  const followingCard = page.locator('.discoveryResultCard').nth(1)
   const box = await selectedHit.boundingBox()
+  const followingBox = await followingCard.boundingBox()
   expect(box).not.toBeNull()
+  expect(followingBox).not.toBeNull()
 
   await page.mouse.move(
     box!.x + box!.width / 2,
@@ -81,14 +89,50 @@ test('left-button drag follows the Discovery corridor and snaps on release', asy
   )
   await page.mouse.down({ button: 'left' })
   await page.mouse.move(
-    box!.x + box!.width / 2 - 72,
+    box!.x + box!.width / 2 + 96,
     box!.y + box!.height / 2,
     { steps: 6 },
   )
   await expect(discoveryView).toHaveClass(/isResultPointerDragging/)
+  const followingDragBox = await followingCard.boundingBox()
+  expect(followingDragBox).not.toBeNull()
+  expect(followingDragBox!.x).toBeGreaterThan(followingBox!.x)
   await page.mouse.up({ button: 'left' })
 
   await expect(discoveryView).not.toHaveClass(/isResultPointerDragging/)
+  await expect(selectedHit).not.toHaveAttribute(
+    'data-discovery-result-id',
+    initialId ?? '',
+  )
+})
+
+test('macOS-style two-finger scrolling follows the gesture direction', async ({
+  page,
+}) => {
+  test.setTimeout(60_000)
+  await prepareDiscoveryResults(page)
+  const selectedCard = page.locator('.discoveryResultCard.selected')
+  const selectedHit = selectedCard.locator('.discoveryResultHit')
+  const followingCard = page.locator('.discoveryResultCard').nth(1)
+  const corridorCards = page.locator('.discoveryResultCards')
+  const initialId = await selectedHit.getAttribute('data-discovery-result-id')
+  const initialBox = await selectedCard.boundingBox()
+  const followingBox = await followingCard.boundingBox()
+  expect(initialBox).not.toBeNull()
+  expect(followingBox).not.toBeNull()
+
+  await page.mouse.move(
+    initialBox!.x + initialBox!.width / 2,
+    initialBox!.y + initialBox!.height / 2,
+  )
+  // Negative horizontal WheelEvent delta represents fingers travelling right
+  // under macOS natural scrolling, so the visible card must also move right.
+  await page.mouse.wheel(-96, 0)
+  await expect(corridorCards).toHaveClass(/isCorridorMoving/)
+  await expect
+    .poll(async () => (await followingCard.boundingBox())?.x ?? -Infinity)
+    .toBeGreaterThan(followingBox!.x + 4)
+  await expect(corridorCards).not.toHaveClass(/isCorridorMoving/)
   await expect(selectedHit).not.toHaveAttribute(
     'data-discovery-result-id',
     initialId ?? '',

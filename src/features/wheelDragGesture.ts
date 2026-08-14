@@ -42,6 +42,7 @@ export function resolveTrackpadSnapTarget(
   releasePosition: number,
   minimumPosition: number,
   maximumPosition: number,
+  commitProgress = TRACKPAD_SNAP_COMMIT_PROGRESS,
 ) {
   const minimum = Math.min(minimumPosition, maximumPosition)
   const maximum = Math.max(minimumPosition, maximumPosition)
@@ -54,7 +55,7 @@ export function resolveTrackpadSnapTarget(
   const completedSteps = Math.floor(distance)
   const remainder = distance - completedSteps
   const committedSteps = completedSteps + (
-    remainder >= TRACKPAD_SNAP_COMMIT_PROGRESS ? 1 : 0
+    remainder >= Math.max(0, Math.min(1, commitProgress)) ? 1 : 0
   )
   const target = anchor + direction * committedSteps
   return Math.max(minimum, Math.min(maximum, target))

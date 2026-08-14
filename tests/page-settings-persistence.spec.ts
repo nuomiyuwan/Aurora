@@ -25,6 +25,7 @@ test('六个页面的视觉设置可完整持久化并恢复受管资源', () =>
       hue: -30 + index,
       uiBorderColor: '#112233',
       materialTint: '#445566',
+      pedestalTint: '#556677',
       particles: {
         ...settings[view].particles,
         shape: 'snowflake',
@@ -65,6 +66,7 @@ test('六个页面的视觉设置可完整持久化并恢复受管资源', () =>
       hue: settings[view].hue,
       uiBorderColor: settings[view].uiBorderColor,
       materialTint: settings[view].materialTint,
+      pedestalTint: settings[view].pedestalTint,
     })
     expect(restored?.[view].background).toMatchObject({
       kind: settings[view].background?.kind,
@@ -129,6 +131,7 @@ test('损坏字段会被限制或回退，临时 Blob 资源不会写入', () =>
         hue: 999,
         uiBorderColor: 'white',
         materialTint: '#abc',
+        pedestalTint: 'not-a-color',
       },
     },
   }
@@ -142,5 +145,6 @@ test('损坏字段会被限制或回退，临时 Blob 资源不会写入', () =>
     hue: 180,
     uiBorderColor: '#dcdee4',
     materialTint: '#aec5ff',
+    pedestalTint: '#555d66',
   })
 })
