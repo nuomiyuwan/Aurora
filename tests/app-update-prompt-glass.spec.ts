@@ -3,6 +3,7 @@ import { expect, test, type Page } from '@playwright/test'
 const AVAILABLE_UPDATE: AppUpdateState = {
   currentVersion: '1.0.2',
   supported: true,
+  installMode: 'manual-dmg',
   status: 'available',
   latestVersion: '1.0.3',
   releaseName: 'Aurora 1.0.3',

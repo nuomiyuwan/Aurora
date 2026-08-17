@@ -27,13 +27,16 @@ function formatReleaseDate(value: string | null) {
 }
 
 function actionLabel(state: AppUpdateState) {
+  const manualDmg = state.installMode === 'manual-dmg'
   if (state.status === 'downloading') {
     return `正在下载 ${Math.round(state.progress ?? 0)}%`
   }
   if (state.status === 'downloaded') return '正在准备安装…'
-  if (state.status === 'installing') return '正在重启 Aurora…'
+  if (state.status === 'installing') {
+    return manualDmg ? '正在打开安装包…' : '正在重启 Aurora…'
+  }
   if (state.status === 'error') return '重新下载'
-  return '更新并重启'
+  return manualDmg ? '下载并打开安装包' : '更新并重启'
 }
 
 export function AppUpdatePrompt({
@@ -44,6 +47,7 @@ export function AppUpdatePrompt({
 }: AppUpdatePromptProps) {
   const updateButtonRef = useRef<HTMLButtonElement>(null)
   const busy = BUSY_STATUSES.has(state.status)
+  const manualDmg = state.installMode === 'manual-dmg'
   const releaseDate = useMemo(
     () => formatReleaseDate(state.releaseDate),
     [state.releaseDate],
@@ -103,7 +107,9 @@ export function AppUpdatePrompt({
           <span className="appUpdateEyebrow">Software Update</span>
           <h2 id="app-update-title">Aurora 有新版本</h2>
           <p id="app-update-description">
-            后台下载完成后，Aurora 会自动重启并保留当前项目与设置。
+            {manualDmg
+              ? '下载完成后会打开 DMG 并退出 Aurora；请将新版拖入“应用程序”并选择替换，项目与设置不会丢失。'
+              : '后台下载完成后，Aurora 会自动重启并保留当前项目与设置。'}
           </p>
         </header>
 

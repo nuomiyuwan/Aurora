@@ -1594,6 +1594,7 @@ function StageBackgroundMedia({
 const INITIAL_APP_UPDATE_STATE: AppUpdateState = {
   currentVersion: __AURORA_VERSION__,
   supported: false,
+  installMode: 'automatic',
   status: 'unsupported',
   latestVersion: null,
   releaseName: null,

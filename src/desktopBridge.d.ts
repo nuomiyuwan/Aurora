@@ -883,6 +883,7 @@ declare global {
   interface AppUpdateState {
     currentVersion: string
     supported: boolean
+    installMode: 'automatic' | 'manual-dmg'
     status: AppUpdateStatus
     latestVersion: string | null
     releaseName: string | null

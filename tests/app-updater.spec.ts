@@ -18,6 +18,7 @@ type UpdateStatus =
 interface UpdateState {
   currentVersion: string
   supported: boolean
+  installMode: 'automatic' | 'manual-dmg'
   status: UpdateStatus
   latestVersion: string | null
   releaseName: string | null
@@ -52,6 +53,14 @@ interface UpdateManagerOptions {
   ) => { unref(): void }
   cancelSchedule?: (timer: { unref(): void }) => void
   automaticCheckDelayMs?: number
+  macDmgInstaller?: {
+    downloadAndOpen(options: {
+      updateInfo: unknown
+      feedConfiguration: Record<string, unknown>
+      onProgress(progress: number): void
+      onReadyToOpen(): void
+    }): Promise<unknown>
+  } | null
   logger?: { warn(...args: unknown[]): void }
 }
 
@@ -155,7 +164,7 @@ function createSupportedManager(
     updater,
     currentVersion: '1.0.1',
     packaged: true,
-    platform: 'darwin',
+    platform: 'win32',
     feedConfiguration: {
       provider: 'github',
       owner: 'nuomiyuwan',
@@ -339,6 +348,64 @@ test('GitCode download failures re-check and download from GitHub', async () => 
   manager.dispose()
 })
 
+test('macOS downloads and opens the trusted DMG instead of using Squirrel install', async () => {
+  const updater = new FakeUpdater()
+  const installerCalls: Array<{
+    updateInfo: unknown
+    feedConfiguration: Record<string, unknown>
+  }> = []
+  const macDmgInstaller = {
+    async downloadAndOpen(options: {
+      updateInfo: unknown
+      feedConfiguration: Record<string, unknown>
+      onProgress(progress: number): void
+      onReadyToOpen(): void
+    }) {
+      installerCalls.push({
+        updateInfo: options.updateInfo,
+        feedConfiguration: options.feedConfiguration,
+      })
+      options.onProgress(46.6)
+      options.onReadyToOpen()
+      return { filePath: '/updates/Aurora-macOS-1.1.1-arm64.dmg' }
+    },
+  }
+  const manager = createSupportedManager(updater, {
+    platform: 'darwin',
+    macDmgInstaller,
+    feedConfiguration: {
+      provider: 'github',
+      owner: 'nuomiyuwan',
+      repo: 'Aurora',
+    },
+  })
+  const updateInfo = {
+    version: '1.1.1',
+    files: [{ url: 'Aurora-macOS-1.1.1-arm64.dmg' }],
+  }
+  updater.emit('update-available', updateInfo)
+
+  expect(await manager.downloadAndInstall()).toMatchObject({
+    installMode: 'manual-dmg',
+    status: 'installing',
+    source: 'install',
+    progress: 100,
+  })
+  expect(installerCalls).toEqual([
+    {
+      updateInfo,
+      feedConfiguration: {
+        provider: 'github',
+        owner: 'nuomiyuwan',
+        repo: 'Aurora',
+      },
+    },
+  ])
+  expect(updater.downloadCalls).toBe(0)
+  expect(updater.quitCalls).toHaveLength(0)
+  manager.dispose()
+})
+
 test('download progress is clamped and downloaded update restarts Aurora automatically', async () => {
   const updater = new FakeUpdater()
   const scheduler = createScheduler()
@@ -349,6 +416,7 @@ test('download progress is clamped and downloaded update restarts Aurora automat
 
   expect(updater.autoDownload).toBe(false)
   expect(updater.autoInstallOnAppQuit).toBe(false)
+  expect(manager.getState().installMode).toBe('automatic')
   expect(updater.feedConfigurations).toEqual([
     {
       provider: 'github',

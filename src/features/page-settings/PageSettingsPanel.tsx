@@ -148,6 +148,7 @@ const RANGE_THUMB_HIT_PADDING = 4
 const FALLBACK_APP_UPDATE_STATE: AppUpdateState = {
   currentVersion: __AURORA_VERSION__,
   supported: false,
+  installMode: 'automatic',
   status: 'unsupported',
   latestVersion: null,
   releaseName: null,
@@ -168,7 +169,9 @@ function appUpdateButtonLabel(state: AppUpdateState) {
     return `下载 ${Math.round(state.progress ?? 0)}%`
   }
   if (state.status === 'downloaded') return '准备安装…'
-  if (state.status === 'installing') return '正在重启…'
+  if (state.status === 'installing') {
+    return state.installMode === 'manual-dmg' ? '正在打开…' : '正在重启…'
+  }
   if (state.status === 'error') return '重新检查'
   return '检查更新'
 }

@@ -71,10 +71,11 @@ function normalizeReleaseNotes(updateInfo) {
   return unique
 }
 
-function createInitialState({ currentVersion, supported }) {
+function createInitialState({ currentVersion, supported, installMode }) {
   return {
     currentVersion,
     supported,
+    installMode,
     status: supported ? 'idle' : 'unsupported',
     latestVersion: null,
     releaseName: null,
@@ -112,12 +113,14 @@ function createAppUpdateManager({
   schedule = setTimeout,
   cancelSchedule = clearTimeout,
   automaticCheckDelayMs = DEFAULT_AUTOMATIC_CHECK_DELAY_MS,
+  macDmgInstaller = null,
   logger = console,
 }) {
   const supported = Boolean(
     packaged && updater && (platform === 'darwin' || platform === 'win32'),
   )
-  let state = createInitialState({ currentVersion, supported })
+  const installMode = platform === 'darwin' ? 'manual-dmg' : 'automatic'
+  let state = createInitialState({ currentVersion, supported, installMode })
   let checkPromise = null
   let automaticCheckTimer = null
   let automaticCheckScheduled = false
@@ -126,6 +129,8 @@ function createAppUpdateManager({
   let activeFeedIndex = -1
   let suppressUpdaterErrors = 0
   let deferredUpdaterError = null
+  let availableUpdateInfo = null
+  let availableUpdateFeedIndex = -1
   const listeners = []
   const configuredFeeds = normalizeFeedConfigurations(
     feedConfiguration,
@@ -165,6 +170,12 @@ function createAppUpdateManager({
     activeFeedIndex = index
   }
 
+  const captureAvailableUpdate = (info, feedIndex = activeFeedIndex) => {
+    if (platform !== 'darwin' || !info) return
+    availableUpdateInfo = info
+    availableUpdateFeedIndex = feedIndex
+  }
+
   const runUpdaterAttempt = async (operation) => {
     deferredUpdaterError = null
     const result = await operation()
@@ -190,7 +201,9 @@ function createAppUpdateManager({
       for (let index = 0; index < feedAttemptCount(); index += 1) {
         selectFeed(index)
         try {
-          return await runUpdaterAttempt(() => updater.checkForUpdates())
+          const result = await runUpdaterAttempt(() => updater.checkForUpdates())
+          captureAvailableUpdate(result?.updateInfo, index)
+          return result
         } catch (error) {
           latestError = error
           if (index + 1 < feedAttemptCount()) {
@@ -207,13 +220,19 @@ function createAppUpdateManager({
       kind === 'download'
         ? '更新下载失败，请稍后重试。'
         : kind === 'install'
-          ? '更新安装失败，请稍后重试。'
+          ? installMode === 'manual-dmg'
+            ? '更新安装包无法打开，请稍后重试。'
+            : '更新安装失败，请稍后重试。'
           : '暂时无法检查更新，请稍后重试。'
     return emit({ status: 'error', progress: null, error: message })
   }
 
   const installDownloadedUpdate = () => {
-    if (!supported || state.status !== 'downloaded') return false
+    if (
+      !supported ||
+      installMode !== 'automatic' ||
+      state.status !== 'downloaded'
+    ) return false
     emit({ status: 'installing', progress: 100, error: null })
     try {
       updater.quitAndInstall(false, true)
@@ -233,6 +252,7 @@ function createAppUpdateManager({
       emit({ status: 'checking', progress: null, error: null })
     })
     listen('update-available', (info) => {
+      captureAvailableUpdate(info)
       emit({
         status: 'available',
         latestVersion:
@@ -248,6 +268,10 @@ function createAppUpdateManager({
       })
     })
     listen('update-not-available', () => {
+      if (platform === 'darwin') {
+        availableUpdateInfo = null
+        availableUpdateFeedIndex = -1
+      }
       emit({
         status: 'up-to-date',
         latestVersion: null,
@@ -260,6 +284,7 @@ function createAppUpdateManager({
       })
     })
     listen('download-progress', (progress) => {
+      if (installMode !== 'automatic') return
       emit({
         status: 'downloading',
         progress: clampProgress(progress?.percent) ?? state.progress ?? 0,
@@ -267,6 +292,7 @@ function createAppUpdateManager({
       })
     })
     listen('update-downloaded', (info) => {
+      if (installMode !== 'automatic') return
       const downloadedReleaseNotes = normalizeReleaseNotes(info)
       emit({
         status: 'downloaded',
@@ -307,6 +333,10 @@ function createAppUpdateManager({
       return Promise.resolve(cloneState(state))
     }
     installRequested = false
+    if (platform === 'darwin') {
+      availableUpdateInfo = null
+      availableUpdateFeedIndex = -1
+    }
     emit({ status: 'checking', source, progress: null, error: null })
     checkPromise = Promise.resolve()
       .then(() => checkConfiguredFeeds())
@@ -343,18 +373,54 @@ function createAppUpdateManager({
           index < feedAttemptCount();
           index += 1
         ) {
-          if (index !== firstFeedIndex) {
+          try {
             selectFeed(index)
-            await runUpdaterAttempt(() => updater.checkForUpdates())
+            if (
+              index !== firstFeedIndex ||
+              (installMode === 'manual-dmg' &&
+                (availableUpdateFeedIndex !== index || !availableUpdateInfo))
+            ) {
+              const result = await runUpdaterAttempt(() => updater.checkForUpdates())
+              captureAvailableUpdate(result?.updateInfo, index)
+            }
             emit({
               status: 'downloading',
               source: 'install',
               progress: 0,
               error: null,
             })
-          }
-          try {
-            await runUpdaterAttempt(() => updater.downloadUpdate())
+
+            if (installMode === 'manual-dmg') {
+              if (
+                !macDmgInstaller ||
+                availableUpdateFeedIndex !== index ||
+                !availableUpdateInfo
+              ) {
+                throw new Error('The macOS installer metadata is unavailable')
+              }
+              await macDmgInstaller.downloadAndOpen({
+                updateInfo: availableUpdateInfo,
+                feedConfiguration: configuredFeeds[index],
+                onProgress: (progress) => {
+                  emit({
+                    status: 'downloading',
+                    source: 'install',
+                    progress: clampProgress(progress) ?? state.progress ?? 0,
+                    error: null,
+                  })
+                },
+                onReadyToOpen: () => {
+                  emit({
+                    status: 'installing',
+                    source: 'install',
+                    progress: 100,
+                    error: null,
+                  })
+                },
+              })
+            } else {
+              await runUpdaterAttempt(() => updater.downloadUpdate())
+            }
             return
           } catch (error) {
             latestError = error
@@ -369,7 +435,7 @@ function createAppUpdateManager({
         throw latestError ?? new Error('No update download source is available')
       })
     } catch (error) {
-      fail('download', error)
+      fail(state.status === 'installing' ? 'install' : 'download', error)
     }
     return cloneState(state)
   }

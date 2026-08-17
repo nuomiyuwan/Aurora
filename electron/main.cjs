@@ -45,6 +45,7 @@ const { createWindowRevealGate } = require('./windowRevealGate.cjs')
 const { toggleWindowFullscreen } = require('./windowControls.cjs')
 const { createExternalVideoOpenBroker } = require('./externalVideoOpen.cjs')
 const { createAppUpdateManager } = require('./appUpdater.cjs')
+const { createMacDmgInstaller } = require('./macDmgUpdate.cjs')
 const {
   createOnlineProviderRegistry,
 } = require('./onlineProviderRegistry.cjs')
@@ -768,11 +769,21 @@ function ensureMainWindow() {
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
   if (process.platform === 'win32') Menu.setApplicationMenu(null)
 
+  const macDmgInstaller = process.platform === 'darwin'
+    ? createMacDmgInstaller({
+        userDataPath: app.getPath('userData'),
+        architecture: process.arch,
+        openPath: (filePath) => shell.openPath(filePath),
+        quitApp: () => app.quit(),
+      })
+    : null
+
   appUpdateManager = createAppUpdateManager({
     updater: autoUpdater,
     currentVersion: app.getVersion(),
     packaged: app.isPackaged,
     platform: process.platform,
+    macDmgInstaller,
     feedConfigurations: [
       {
         provider: 'generic',
