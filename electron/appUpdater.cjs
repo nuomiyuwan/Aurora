@@ -94,12 +94,20 @@ function cloneState(state) {
   }
 }
 
+function normalizeFeedConfigurations(feedConfiguration, feedConfigurations) {
+  if (Array.isArray(feedConfigurations) && feedConfigurations.length > 0) {
+    return feedConfigurations.filter(Boolean)
+  }
+  return feedConfiguration ? [feedConfiguration] : []
+}
+
 function createAppUpdateManager({
   updater,
   currentVersion,
   packaged,
   platform,
   feedConfiguration = null,
+  feedConfigurations = null,
   onStateChange = () => {},
   schedule = setTimeout,
   cancelSchedule = clearTimeout,
@@ -115,7 +123,14 @@ function createAppUpdateManager({
   let automaticCheckScheduled = false
   let installRequested = false
   let disposed = false
+  let activeFeedIndex = -1
+  let suppressUpdaterErrors = 0
+  let deferredUpdaterError = null
   const listeners = []
+  const configuredFeeds = normalizeFeedConfigurations(
+    feedConfiguration,
+    feedConfigurations,
+  )
 
   const emit = (patch) => {
     if (disposed) return cloneState(state)
@@ -139,6 +154,52 @@ function createAppUpdateManager({
     updater.on(eventName, listener)
     listeners.push([eventName, listener])
   }
+
+  const selectFeed = (index) => {
+    const configuration = configuredFeeds[index]
+    if (!configuration || typeof updater.setFeedURL !== 'function') return
+    if (activeFeedIndex === index) return
+    const { requestHeaders = null, ...providerConfiguration } = configuration
+    updater.requestHeaders = requestHeaders
+    updater.setFeedURL(providerConfiguration)
+    activeFeedIndex = index
+  }
+
+  const runUpdaterAttempt = async (operation) => {
+    deferredUpdaterError = null
+    const result = await operation()
+    if (deferredUpdaterError) throw deferredUpdaterError
+    return result
+  }
+
+  const runWithDeferredUpdaterErrors = async (operation) => {
+    suppressUpdaterErrors += 1
+    try {
+      return await operation()
+    } finally {
+      suppressUpdaterErrors -= 1
+      deferredUpdaterError = null
+    }
+  }
+
+  const feedAttemptCount = () => Math.max(1, configuredFeeds.length)
+
+  const checkConfiguredFeeds = async () =>
+    runWithDeferredUpdaterErrors(async () => {
+      let latestError = null
+      for (let index = 0; index < feedAttemptCount(); index += 1) {
+        selectFeed(index)
+        try {
+          return await runUpdaterAttempt(() => updater.checkForUpdates())
+        } catch (error) {
+          latestError = error
+          if (index + 1 < feedAttemptCount()) {
+            logger?.warn?.('[Aurora updater] primary update source unavailable', error)
+          }
+        }
+      }
+      throw latestError ?? new Error('No update source is available')
+    })
 
   const fail = (kind, error) => {
     logger?.warn?.(`[Aurora updater] ${kind}`, error)
@@ -166,12 +227,7 @@ function createAppUpdateManager({
   if (supported) {
     updater.autoDownload = false
     updater.autoInstallOnAppQuit = false
-    if (
-      feedConfiguration &&
-      typeof updater.setFeedURL === 'function'
-    ) {
-      updater.setFeedURL(feedConfiguration)
-    }
+    selectFeed(0)
 
     listen('checking-for-update', () => {
       emit({ status: 'checking', progress: null, error: null })
@@ -230,6 +286,10 @@ function createAppUpdateManager({
       }
     })
     listen('error', (error) => {
+      if (suppressUpdaterErrors > 0) {
+        deferredUpdaterError = error
+        return
+      }
       const kind =
         state.status === 'installing'
           ? 'install'
@@ -249,7 +309,7 @@ function createAppUpdateManager({
     installRequested = false
     emit({ status: 'checking', source, progress: null, error: null })
     checkPromise = Promise.resolve()
-      .then(() => updater.checkForUpdates())
+      .then(() => checkConfiguredFeeds())
       .then(() => cloneState(state))
       .catch((error) => fail('check', error))
       .finally(() => {
@@ -273,7 +333,41 @@ function createAppUpdateManager({
     installRequested = true
     emit({ status: 'downloading', source: 'install', progress: 0, error: null })
     try {
-      await updater.downloadUpdate()
+      await runWithDeferredUpdaterErrors(async () => {
+        let latestError = null
+        const firstFeedIndex = activeFeedIndex < 0
+          ? 0
+          : Math.min(activeFeedIndex, feedAttemptCount() - 1)
+        for (
+          let index = firstFeedIndex;
+          index < feedAttemptCount();
+          index += 1
+        ) {
+          if (index !== firstFeedIndex) {
+            selectFeed(index)
+            await runUpdaterAttempt(() => updater.checkForUpdates())
+            emit({
+              status: 'downloading',
+              source: 'install',
+              progress: 0,
+              error: null,
+            })
+          }
+          try {
+            await runUpdaterAttempt(() => updater.downloadUpdate())
+            return
+          } catch (error) {
+            latestError = error
+            if (index + 1 < feedAttemptCount()) {
+              logger?.warn?.(
+                '[Aurora updater] primary download source unavailable',
+                error,
+              )
+            }
+          }
+        }
+        throw latestError ?? new Error('No update download source is available')
+      })
     } catch (error) {
       fail('download', error)
     }

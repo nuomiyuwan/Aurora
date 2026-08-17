@@ -43,11 +43,8 @@ interface UpdateManagerOptions {
   currentVersion: string
   packaged: boolean
   platform: string
-  feedConfiguration?: {
-    provider: 'github'
-    owner: string
-    repo: string
-  }
+  feedConfiguration?: Record<string, unknown>
+  feedConfigurations?: Array<Record<string, unknown>>
   onStateChange?: (state: UpdateState) => void
   schedule?: (
     callback: () => unknown,
@@ -68,11 +65,15 @@ const { createAppUpdateManager, normalizeReleaseNotes } = require(
 class FakeUpdater extends EventEmitter {
   autoDownload = true
   autoInstallOnAppQuit = true
+  requestHeaders: Record<string, string> | null = null
   checkCalls = 0
   downloadCalls = 0
   quitCalls: Array<[boolean, boolean]> = []
   checkError: Error | null = null
   downloadError: Error | null = null
+  checkErrors: Array<Error | null> = []
+  downloadErrors: Array<Error | null> = []
+  emitErrorsWithRejections = false
   installError: Error | null = null
   feedConfigurations: unknown[] = []
 
@@ -82,13 +83,25 @@ class FakeUpdater extends EventEmitter {
 
   async checkForUpdates() {
     this.checkCalls += 1
-    if (this.checkError) throw this.checkError
+    const error = this.checkErrors.length > 0
+      ? this.checkErrors.shift()
+      : this.checkError
+    if (error) {
+      if (this.emitErrorsWithRejections) this.emit('error', error)
+      throw error
+    }
     return null
   }
 
   async downloadUpdate() {
     this.downloadCalls += 1
-    if (this.downloadError) throw this.downloadError
+    const error = this.downloadErrors.length > 0
+      ? this.downloadErrors.shift()
+      : this.downloadError
+    if (error) {
+      if (this.emitErrorsWithRejections) this.emit('error', error)
+      throw error
+    }
     return []
   }
 
@@ -244,6 +257,85 @@ test('available update exposes deduplicated plain-text release notes', async () 
     (_, index) => `<p>第 ${index + 1} 项</p>`,
   )
   expect(normalizeReleaseNotes({ releaseNotes: tooManyNotes })).toHaveLength(12)
+  manager.dispose()
+})
+
+test('GitCode check failures fall back to GitHub without exposing a transient error', async () => {
+  const updater = new FakeUpdater()
+  updater.checkErrors = [new Error('GitCode unavailable'), null]
+  updater.emitErrorsWithRejections = true
+  const manager = createSupportedManager(updater, {
+    feedConfigurations: [
+      {
+        provider: 'generic',
+        url: 'https://gitcode.com/nuomiyuwan/Aurora-Updates/releases/download/latest/',
+        requestHeaders: { 'Private-Token': '' },
+      },
+      {
+        provider: 'github',
+        owner: 'nuomiyuwan',
+        repo: 'Aurora',
+      },
+    ],
+    logger: { warn() {} },
+  })
+
+  expect(updater.requestHeaders).toEqual({ 'Private-Token': '' })
+  expect(await manager.checkForUpdates({ source: 'manual' })).toMatchObject({
+    status: 'checking',
+    source: 'manual',
+    error: null,
+  })
+  expect(updater.checkCalls).toBe(2)
+  expect(updater.requestHeaders).toBeNull()
+  expect(updater.feedConfigurations).toEqual([
+    {
+      provider: 'generic',
+      url: 'https://gitcode.com/nuomiyuwan/Aurora-Updates/releases/download/latest/',
+    },
+    {
+      provider: 'github',
+      owner: 'nuomiyuwan',
+      repo: 'Aurora',
+    },
+  ])
+  manager.dispose()
+})
+
+test('GitCode download failures re-check and download from GitHub', async () => {
+  const updater = new FakeUpdater()
+  updater.downloadErrors = [new Error('GitCode CDN unavailable'), null]
+  updater.emitErrorsWithRejections = true
+  const manager = createSupportedManager(updater, {
+    feedConfigurations: [
+      {
+        provider: 'generic',
+        url: 'https://gitcode.com/nuomiyuwan/Aurora-Updates/releases/download/latest/',
+        requestHeaders: { 'Private-Token': '' },
+      },
+      {
+        provider: 'github',
+        owner: 'nuomiyuwan',
+        repo: 'Aurora',
+      },
+    ],
+    logger: { warn() {} },
+  })
+  updater.emit('update-available', { version: '1.1.0' })
+
+  expect(await manager.downloadAndInstall()).toMatchObject({
+    status: 'downloading',
+    latestVersion: '1.1.0',
+    error: null,
+  })
+  expect(updater.downloadCalls).toBe(2)
+  expect(updater.checkCalls).toBe(1)
+  expect(updater.requestHeaders).toBeNull()
+  expect(updater.feedConfigurations.at(-1)).toEqual({
+    provider: 'github',
+    owner: 'nuomiyuwan',
+    repo: 'Aurora',
+  })
   manager.dispose()
 })
 

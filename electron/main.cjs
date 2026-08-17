@@ -773,11 +773,18 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     currentVersion: app.getVersion(),
     packaged: app.isPackaged,
     platform: process.platform,
-    feedConfiguration: {
-      provider: 'github',
-      owner: 'nuomiyuwan',
-      repo: 'Aurora',
-    },
+    feedConfigurations: [
+      {
+        provider: 'generic',
+        url: 'https://gitcode.com/nuomiyuwan/Aurora-Updates/releases/download/latest/',
+        requestHeaders: { 'Private-Token': '' },
+      },
+      {
+        provider: 'github',
+        owner: 'nuomiyuwan',
+        repo: 'Aurora',
+      },
+    ],
     onStateChange: (state) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send(APP_UPDATE_STATE_CHANNEL, state)
