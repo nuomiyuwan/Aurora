@@ -2009,9 +2009,102 @@ function createAiVisualSearchService({
     return task
   }
 
+  async function executeRemoveAssetCache(assetId) {
+    const cache = await readCache(cachePath, fileSystem)
+    let removedEntries = 0
+    for (const [key, entry] of Object.entries(cache.entries)) {
+      if (entry.assetId !== assetId) continue
+      delete cache.entries[key]
+      removedEntries += 1
+    }
+    if (removedEntries > 0) {
+      await writeCacheAtomically(cachePath, cache, fileSystem)
+    }
+    return { assetId, removedEntries }
+  }
+
+  function retainedAssetIdsFromRequest(input) {
+    const values = input?.retainedAssetIds
+    if (!Array.isArray(values) || values.length > 100_000) {
+      throw new AiVisualSearchError(
+        'AI_SEARCH_INVALID_INPUT',
+        '保留素材列表无效。',
+      )
+    }
+    return new Set(values.map((value) => boundedString(value, '素材 ID')))
+  }
+
+  async function executeInspectCache(input) {
+    const retainedAssetIds = retainedAssetIdsFromRequest(input)
+    const cache = await readCache(cachePath, fileSystem)
+    const entries = Object.values(cache.entries)
+    return {
+      totalEntries: entries.length,
+      reclaimableEntries: entries.filter(
+        (entry) => !retainedAssetIds.has(entry.assetId),
+      ).length,
+    }
+  }
+
+  function inspectCache(input) {
+    const execute = () => executeInspectCache(input)
+    const task = operationQueue.then(execute, execute)
+    operationQueue = task.then(
+      () => undefined,
+      () => undefined,
+    )
+    return task
+  }
+
+  async function executeCleanCache(input) {
+    const retainedAssetIds = retainedAssetIdsFromRequest(input)
+    const cache = await readCache(cachePath, fileSystem)
+    let removedEntries = 0
+    for (const [key, entry] of Object.entries(cache.entries)) {
+      if (retainedAssetIds.has(entry.assetId)) continue
+      delete cache.entries[key]
+      removedEntries += 1
+    }
+    if (removedEntries > 0) {
+      await writeCacheAtomically(cachePath, cache, fileSystem)
+    }
+    return {
+      totalEntries: Object.keys(cache.entries).length,
+      reclaimableEntries: 0,
+      removedEntries,
+    }
+  }
+
+  function cleanCache(input) {
+    const execute = () => executeCleanCache(input)
+    const task = operationQueue.then(execute, execute)
+    operationQueue = task.then(
+      () => undefined,
+      () => undefined,
+    )
+    return task
+  }
+
+  function removeAssetCache(input) {
+    const assetId = boundedString(
+      typeof input === 'string' ? input : input?.assetId,
+      '素材 ID',
+    )
+    const execute = () => executeRemoveAssetCache(assetId)
+    const task = operationQueue.then(execute, execute)
+    operationQueue = task.then(
+      () => undefined,
+      () => undefined,
+    )
+    return task
+  }
+
   return {
     search,
     analyzeFrames,
+    cleanCache,
+    inspectCache,
+    removeAssetCache,
     testProfile,
     testVisionProfile,
     testEmbeddingProfile,

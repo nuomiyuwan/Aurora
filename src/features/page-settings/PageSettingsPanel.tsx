@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import {
   Folder,
+  HardDrive,
   Image,
   KeyRound,
   Palette,
@@ -39,6 +40,20 @@ export type PageVisualSettings = {
   materialTint: string
   pedestalTint: string
   particles: HomeParticleSettings
+}
+
+export type AppCacheState = {
+  status: 'idle' | 'checking' | 'ready' | 'cleaning' | 'cleaned' | 'error'
+  totalBytes: number
+  reclaimableBytes: number
+  totalDirectories: number
+  reclaimableDirectories: number
+  semanticEntries: number
+  reclaimableSemanticEntries: number
+  removedBytes: number
+  removedDirectories: number
+  removedSemanticEntries: number
+  error: string | null
 }
 
 export type AiServiceKind = 'vision' | 'embedding'
@@ -138,6 +153,9 @@ export type PageSettingsPanelProps = {
   onRemoveCustomParticleMedia?: () => void
   appUpdateState?: AppUpdateState
   onCheckForUpdates?: () => void
+  appCacheState?: AppCacheState
+  onInspectAppCache?: () => void
+  onCleanAppCache?: () => void
   onChange: (patch: Partial<PageVisualSettings>) => void
   onParticlesChange: (patch: Partial<HomeParticleSettings>) => void
 }
@@ -158,6 +176,33 @@ const FALLBACK_APP_UPDATE_STATE: AppUpdateState = {
   checkedAt: null,
   source: null,
   error: null,
+}
+
+const FALLBACK_APP_CACHE_STATE: AppCacheState = {
+  status: 'idle',
+  totalBytes: 0,
+  reclaimableBytes: 0,
+  totalDirectories: 0,
+  reclaimableDirectories: 0,
+  semanticEntries: 0,
+  reclaimableSemanticEntries: 0,
+  removedBytes: 0,
+  removedDirectories: 0,
+  removedSemanticEntries: 0,
+  error: null,
+}
+
+function formatStorageBytes(value: number) {
+  const bytes = Math.max(0, Number(value) || 0)
+  if (bytes < 1024) return `${Math.round(bytes)} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let amount = bytes / 1024
+  let unitIndex = 0
+  while (amount >= 1024 && unitIndex < units.length - 1) {
+    amount /= 1024
+    unitIndex += 1
+  }
+  return `${amount >= 10 ? amount.toFixed(1) : amount.toFixed(2)} ${units[unitIndex]}`
 }
 
 function appUpdateButtonLabel(state: AppUpdateState) {
@@ -690,6 +735,9 @@ export function PageSettingsPanel({
   onRemoveCustomParticleMedia,
   appUpdateState = FALLBACK_APP_UPDATE_STATE,
   onCheckForUpdates,
+  appCacheState = FALLBACK_APP_CACHE_STATE,
+  onInspectAppCache,
+  onCleanAppCache,
   onChange,
   onParticlesChange,
 }: PageSettingsPanelProps) {
@@ -707,6 +755,31 @@ export function PageSettingsPanel({
   >(null)
   const aiLocalModelDetectorRef = useRef(onDetectAiLocalModels)
   aiLocalModelDetectorRef.current = onDetectAiLocalModels
+  const cacheBusy =
+    appCacheState.status === 'checking' || appCacheState.status === 'cleaning'
+  const cacheCanClean =
+    appCacheState.reclaimableDirectories > 0 ||
+    appCacheState.reclaimableSemanticEntries > 0
+  const cacheReadyLabel =
+    appCacheState.reclaimableBytes > 0
+      ? `可释放 ${formatStorageBytes(appCacheState.reclaimableBytes)}`
+      : `可清理 ${appCacheState.reclaimableSemanticEntries} 条 AI 视觉索引`
+  const cacheCleanedLabel =
+    appCacheState.removedBytes > 0
+      ? `已清理 ${formatStorageBytes(appCacheState.removedBytes)}`
+      : appCacheState.removedSemanticEntries > 0
+        ? `已清理 ${appCacheState.removedSemanticEntries} 条 AI 视觉索引`
+        : '清理完成'
+  const cacheButtonLabel =
+    appCacheState.status === 'checking'
+      ? '正在检查…'
+      : appCacheState.status === 'cleaning'
+        ? '正在清理…'
+        : cacheCanClean
+          ? '清理可释放缓存'
+          : appCacheState.status === 'idle'
+            ? '检查缓存'
+            : '重新检查'
 
   const detectAiLocalModels = useCallback(async () => {
     const detect = aiLocalModelDetectorRef.current
@@ -1395,6 +1468,65 @@ export function PageSettingsPanel({
             </label>
           </section>
         )}
+
+        <section className="pageSettingsSection" aria-labelledby="page-settings-cache">
+          <div className="pageSettingsSectionTitle">
+            <HardDrive aria-hidden="true" size={15} strokeWidth={1.5} />
+            <h3 id="page-settings-cache">存储与缓存</h3>
+          </div>
+          <div
+            className="pageSettingsCacheCard uiGlassInset"
+            data-status={appCacheState.status}
+          >
+            <span aria-live="polite">
+              <strong>
+                {appCacheState.status === 'idle'
+                  ? '尚未检查'
+                  : appCacheState.status === 'checking'
+                    ? '正在统计 Aurora 缓存'
+                    : appCacheState.status === 'cleaning'
+                      ? '正在清理未使用缓存'
+                      : appCacheState.status === 'error'
+                        ? '缓存检查失败'
+                        : appCacheState.status === 'cleaned'
+                          ? cacheCleanedLabel
+                          : cacheCanClean
+                            ? cacheReadyLabel
+                            : '暂无可清理缓存'}
+              </strong>
+              <small>
+                {appCacheState.status === 'idle'
+                  ? '检查未被项目或收藏使用的缓存'
+                  : appCacheState.status === 'error'
+                    ? appCacheState.error ?? '请稍后重试'
+                    : appCacheState.status === 'cleaned'
+                      ? appCacheState.removedSemanticEntries > 0 && appCacheState.removedBytes > 0
+                        ? `另清理 ${appCacheState.removedSemanticEntries} 条 AI 视觉索引`
+                        : `剩余媒体缓存 ${formatStorageBytes(appCacheState.totalBytes)} · AI 视觉索引 ${appCacheState.semanticEntries} 条`
+                      : `媒体缓存 ${formatStorageBytes(appCacheState.totalBytes)} · AI 视觉索引 ${appCacheState.semanticEntries} 条`}
+              </small>
+            </span>
+            <button
+              className="pageSettingsCacheButton uiGlassInteractive"
+              type="button"
+              disabled={
+                cacheBusy ||
+                (cacheCanClean ? !onCleanAppCache : !onInspectAppCache)
+              }
+              onClick={cacheCanClean ? onCleanAppCache : onInspectAppCache}
+            >
+              {cacheCanClean && !cacheBusy ? (
+                <Trash2 aria-hidden="true" size={12} strokeWidth={1.5} />
+              ) : (
+                <RefreshCw aria-hidden="true" size={12} strokeWidth={1.5} />
+              )}
+              <span>{cacheButtonLabel}</span>
+            </button>
+          </div>
+          <p className="pageSettingsCacheHint">
+            只清理 Aurora 托管的未使用预览、抽帧与 AI 搜索缓存；磁盘原文件和使用中的素材不会删除。
+          </p>
+        </section>
       </div>
 
         <footer className="pageSettingsFooter">

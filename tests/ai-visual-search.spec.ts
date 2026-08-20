@@ -130,6 +130,19 @@ type AiVisualFrameAnalysisResponse = {
 
 type AiVisualSearchService = {
   cachePath: string
+  inspectCache(input: { retainedAssetIds: string[] }): Promise<{
+    totalEntries: number
+    reclaimableEntries: number
+  }>
+  cleanCache(input: { retainedAssetIds: string[] }): Promise<{
+    totalEntries: number
+    reclaimableEntries: number
+    removedEntries: number
+  }>
+  removeAssetCache(input: string | { assetId: string }): Promise<{
+    assetId: string
+    removedEntries: number
+  }>
   search(request: {
     query: string
     candidates: AiVisualFrameCandidate[]
@@ -463,6 +476,91 @@ test('兼容 chat/completions 与动态维数 embeddings，并跨重启复用缓
   expect(readFileSync(service.cachePath, 'utf8')).toContain(
     embeddingServiceFingerprint(activeProfile, descriptionFingerprint),
   )
+})
+
+test('删除素材时只清理该素材的语义视觉缓存', async () => {
+  const { userDataPath, candidates } = createHarness()
+  const provider = createCompatibleProviderMock()
+  const profile = cloudProfile()
+  const credentialsStore: CredentialsStoreStub = {
+    readActiveProfileForMainProcess: async () => profile,
+    resolveProfileInputForMainProcess: async () => profile,
+  }
+  const service = createAiVisualSearchService({
+    userDataPath,
+    credentialsStore,
+    fetchImpl: provider.fetchImpl,
+  })
+
+  await service.search({ query: '雪山', candidates, limit: 9 })
+  const cache = JSON.parse(readFileSync(service.cachePath, 'utf8')) as {
+    version: number
+    entries: Record<string, Record<string, unknown>>
+  }
+  const retainedEntry = {
+    ...Object.values(cache.entries)[0],
+    assetId: 'asset-2',
+    frameId: 'asset-2-frame',
+  }
+  cache.entries['f'.repeat(64)] = retainedEntry
+  writeFileSync(service.cachePath, JSON.stringify(cache))
+
+  const result = await service.removeAssetCache('asset-1')
+  const cleaned = JSON.parse(readFileSync(service.cachePath, 'utf8')) as {
+    entries: Record<string, { assetId: string }>
+  }
+  expect(result.removedEntries).toBeGreaterThan(0)
+  expect(Object.values(cleaned.entries)).toEqual([
+    expect.objectContaining({ assetId: 'asset-2' }),
+  ])
+})
+
+test('cache cleanup keeps semantic entries for retained assets', async () => {
+  const { userDataPath, candidates } = createHarness()
+  const provider = createCompatibleProviderMock()
+  const profile = cloudProfile()
+  const credentialsStore: CredentialsStoreStub = {
+    readActiveProfileForMainProcess: async () => profile,
+    resolveProfileInputForMainProcess: async () => profile,
+  }
+  const service = createAiVisualSearchService({
+    userDataPath,
+    credentialsStore,
+    fetchImpl: provider.fetchImpl,
+  })
+
+  await service.search({ query: '雪山', candidates, limit: 9 })
+  const cache = JSON.parse(readFileSync(service.cachePath, 'utf8')) as {
+    version: number
+    entries: Record<string, Record<string, unknown>>
+  }
+  const orphanEntryCount = Object.keys(cache.entries).length
+  cache.entries['f'.repeat(64)] = {
+    ...Object.values(cache.entries)[0],
+    assetId: 'retained-asset',
+    frameId: 'retained-frame',
+  }
+  writeFileSync(service.cachePath, JSON.stringify(cache))
+
+  await expect(
+    service.inspectCache({ retainedAssetIds: ['retained-asset'] }),
+  ).resolves.toEqual({
+    totalEntries: orphanEntryCount + 1,
+    reclaimableEntries: orphanEntryCount,
+  })
+  await expect(
+    service.cleanCache({ retainedAssetIds: ['retained-asset'] }),
+  ).resolves.toEqual({
+    totalEntries: 1,
+    reclaimableEntries: 0,
+    removedEntries: orphanEntryCount,
+  })
+  const cleaned = JSON.parse(readFileSync(service.cachePath, 'utf8')) as {
+    entries: Record<string, { assetId: string }>
+  }
+  expect(Object.values(cleaned.entries)).toEqual([
+    expect.objectContaining({ assetId: 'retained-asset' }),
+  ])
 })
 
 test('语义分数不高于通用画面基线时不硬返回无关结果', async () => {

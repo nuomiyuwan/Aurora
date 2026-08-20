@@ -89,14 +89,14 @@ test('left-button drag follows the Discovery corridor and snaps on release', asy
   )
   await page.mouse.down({ button: 'left' })
   await page.mouse.move(
-    box!.x + box!.width / 2 + 96,
+    box!.x + box!.width / 2 - 96,
     box!.y + box!.height / 2,
     { steps: 6 },
   )
   await expect(discoveryView).toHaveClass(/isResultPointerDragging/)
   const followingDragBox = await followingCard.boundingBox()
   expect(followingDragBox).not.toBeNull()
-  expect(followingDragBox!.x).toBeGreaterThan(followingBox!.x)
+  expect(followingDragBox!.x).toBeLessThan(followingBox!.x)
   await page.mouse.up({ button: 'left' })
 
   await expect(discoveryView).not.toHaveClass(/isResultPointerDragging/)
@@ -125,16 +125,43 @@ test('macOS-style two-finger scrolling follows the gesture direction', async ({
     initialBox!.x + initialBox!.width / 2,
     initialBox!.y + initialBox!.height / 2,
   )
-  // Negative horizontal WheelEvent delta represents fingers travelling right
-  // under macOS natural scrolling, so the visible card must also move right.
-  await page.mouse.wheel(-96, 0)
+  await page.mouse.wheel(96, 0)
   await expect(corridorCards).toHaveClass(/isCorridorMoving/)
   await expect
-    .poll(async () => (await followingCard.boundingBox())?.x ?? -Infinity)
-    .toBeGreaterThan(followingBox!.x + 4)
+    .poll(async () => (await followingCard.boundingBox())?.x ?? Infinity)
+    .toBeLessThan(followingBox!.x - 4)
   await expect(corridorCards).not.toHaveClass(/isCorridorMoving/)
   await expect(selectedHit).not.toHaveAttribute(
     'data-discovery-result-id',
     initialId ?? '',
   )
+})
+
+test('two-finger navigation stops only after the final result reaches the primary slot', async ({
+  page,
+}) => {
+  test.setTimeout(60_000)
+  await prepareDiscoveryResults(page)
+  const selectedCard = page.locator('.discoveryResultCard.selected')
+  const selectedHit = selectedCard.locator('.discoveryResultHit')
+  const selectedTitle = selectedCard.locator('.discoveryCardCaption strong')
+  const box = await selectedCard.boundingBox()
+  expect(box).not.toBeNull()
+
+  await page.mouse.move(
+    box!.x + box!.width / 2,
+    box!.y + box!.height / 2,
+  )
+  for (let ordinal = 2; ordinal <= 12; ordinal += 1) {
+    await page.mouse.wheel(96, 0)
+    await expect(selectedTitle).toHaveText(`鼠标拖动 第 ${ordinal} 条`)
+  }
+
+  const finalId = await selectedHit.getAttribute('data-discovery-result-id')
+  await page.mouse.wheel(192, 0)
+  await expect(selectedHit).toHaveAttribute(
+    'data-discovery-result-id',
+    finalId ?? '',
+  )
+  await expect(selectedTitle).toHaveText('鼠标拖动 第 12 条')
 })

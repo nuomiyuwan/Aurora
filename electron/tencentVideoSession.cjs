@@ -562,7 +562,12 @@ function normalizeCoverUrl(value) {
     ? `https:${value}`
     : value.replace(/^http:\/\//i, 'https://')
   const parsed = parseSecureUrl(secureValue)
-  if (!parsed || !/(?:^|\.)qpic\.cn$/.test(parsed.hostname)) return null
+  if (!parsed) return null
+  const hostname = parsed.hostname.toLowerCase()
+  if (
+    !/(?:^|\.)qpic\.cn$/.test(hostname) &&
+    hostname !== 'vfiles.gtimg.cn'
+  ) return null
   return parsed.toString()
 }
 

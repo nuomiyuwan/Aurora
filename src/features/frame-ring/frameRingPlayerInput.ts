@@ -25,6 +25,33 @@ export function clampLocalPlayerVolume(volume: number) {
   return Math.min(1, Math.max(0, volume))
 }
 
+export function shouldRestartLocalPlayerPlayback({
+  currentTime,
+  startSeconds,
+  endSeconds,
+  frameDurationSeconds,
+  ended,
+}: {
+  currentTime: number
+  startSeconds: number
+  endSeconds: number
+  frameDurationSeconds: number
+  ended: boolean
+}) {
+  const start = Math.min(startSeconds, endSeconds)
+  const end = Math.max(startSeconds, endSeconds)
+  const restartThreshold = Math.max(
+    start,
+    end - Math.max(0, frameDurationSeconds),
+  )
+  return (
+    ended ||
+    !Number.isFinite(currentTime) ||
+    currentTime < start ||
+    currentTime >= restartThreshold
+  )
+}
+
 export function resolveLocalPlayerTrackpadSeekDelta(
   input: WheelDragInput,
   durationSeconds: number,

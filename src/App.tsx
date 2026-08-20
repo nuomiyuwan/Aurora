@@ -58,6 +58,7 @@ import {
   parsePersistentLibrary,
   serializePersistentLibrary,
 } from './data/libraryPersistence'
+import { removeMediaAssetRecords } from './data/mediaLibraryDeletion'
 import {
   getMediaColorPreset,
   getNextMediaColorPresetId,
@@ -193,6 +194,7 @@ import {
 } from './features/model-viewer/modelAssetRuntime'
 import {
   PageSettingsPanel,
+  type AppCacheState,
   type AiLocalModelDetectionResult,
   type AiServiceConnectionTestResult,
   type AiServiceKind,
@@ -658,6 +660,12 @@ type ClipActionNotice = {
   projectId?: string
 }
 
+type ClipDeleteDialogState = {
+  clipId: string
+  deleting: boolean
+  error: string | null
+}
+
 type ClipAiMetadataDialogState = {
   clipId: string
   filename: string
@@ -750,6 +758,13 @@ function formatProjectTimestamp(timestamp = Date.now()) {
     `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
     `${pad(date.getHours())}:${pad(date.getMinutes())}`,
   ].join(' ')
+}
+
+function withoutRecordKey<T>(current: Record<string, T>, key: string) {
+  if (!Object.prototype.hasOwnProperty.call(current, key)) return current
+  const next = { ...current }
+  delete next[key]
+  return next
 }
 
 function formatProjectMediaSummary(
@@ -1606,6 +1621,20 @@ const INITIAL_APP_UPDATE_STATE: AppUpdateState = {
   error: null,
 }
 
+const INITIAL_APP_CACHE_STATE: AppCacheState = {
+  status: 'idle',
+  totalBytes: 0,
+  reclaimableBytes: 0,
+  totalDirectories: 0,
+  reclaimableDirectories: 0,
+  semanticEntries: 0,
+  reclaimableSemanticEntries: 0,
+  removedBytes: 0,
+  removedDirectories: 0,
+  removedSemanticEntries: 0,
+  error: null,
+}
+
 function App() {
   const defaultActiveIndex = initialProjects.findIndex(
     (project) => project.id === DEFAULT_ACTIVE_PROJECT_ID,
@@ -1674,6 +1703,8 @@ function App() {
   const [clipRemoveDialogId, setClipRemoveDialogId] = useState<string | null>(
     null,
   )
+  const [clipDeleteDialogState, setClipDeleteDialogState] =
+    useState<ClipDeleteDialogState | null>(null)
   const [clipAddMode, setClipAddMode] = useState<'existing' | 'new'>(
     'existing',
   )
@@ -1810,6 +1841,9 @@ function App() {
   const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>(
     INITIAL_APP_UPDATE_STATE,
   )
+  const [appCacheState, setAppCacheState] = useState<AppCacheState>(
+    INITIAL_APP_CACHE_STATE,
+  )
   const [appUpdatePromptOpen, setAppUpdatePromptOpen] = useState(false)
   const [accountCenterOpen, setAccountCenterOpen] = useState(false)
   const [aiSearchMode, setAiSearchMode] = useState(false)
@@ -1908,6 +1942,10 @@ function App() {
   const frameExclusionsRef = useRef(frameExclusions)
   const aiServiceProfilesStateRef = useRef(aiServiceProfilesState)
   const clipAiMetadataRequestVersionRef = useRef(0)
+  const clipDeleteInFlightRef = useRef(false)
+  const deleteClipFromAuroraRef = useRef<() => Promise<void>>(
+    async () => undefined,
+  )
   const importedClipAiMetadataQueueRef = useRef<Promise<void>>(
     Promise.resolve(),
   )
@@ -1988,6 +2026,81 @@ function App() {
       .then(setAppUpdateState)
       .catch(() => undefined)
   }, [saveLatestStateSync])
+
+  const retainedCacheAssetIds = useCallback(() => {
+    const retained = new Set(
+      projectAssetRefsRef.current.map((reference) => reference.assetId),
+    )
+    for (const asset of mediaAssetsRef.current) {
+      if (asset.favorite) retained.add(asset.id)
+    }
+    return [...retained]
+  }, [])
+
+  const inspectAppCache = useCallback(async () => {
+    const bridge = window.desktopBridge
+    if (typeof bridge?.inspectAppCache !== 'function') {
+      setAppCacheState((current) => ({
+        ...current,
+        status: 'error',
+        error: '当前环境不支持缓存管理。',
+      }))
+      return
+    }
+    setAppCacheState((current) => ({
+      ...current,
+      status: 'checking',
+      error: null,
+    }))
+    try {
+      const report = await bridge.inspectAppCache(retainedCacheAssetIds())
+      setAppCacheState({
+        ...report,
+        status: 'ready',
+        removedBytes: 0,
+        removedDirectories: 0,
+        removedSemanticEntries: 0,
+        error: null,
+      })
+    } catch (error) {
+      setAppCacheState((current) => ({
+        ...current,
+        status: 'error',
+        error: error instanceof Error ? error.message : '缓存检查失败。',
+      }))
+    }
+  }, [retainedCacheAssetIds])
+
+  const cleanAppCache = useCallback(async () => {
+    const bridge = window.desktopBridge
+    if (typeof bridge?.cleanAppCache !== 'function') {
+      setAppCacheState((current) => ({
+        ...current,
+        status: 'error',
+        error: '当前环境不支持缓存管理。',
+      }))
+      return
+    }
+    setAppCacheState((current) => ({
+      ...current,
+      status: 'cleaning',
+      error: null,
+    }))
+    try {
+      const report = await bridge.cleanAppCache(retainedCacheAssetIds())
+      setAppCacheState({
+        ...report,
+        status: 'cleaned',
+        error: null,
+      })
+    } catch (error) {
+      setAppCacheState((current) => ({
+        ...current,
+        status: 'error',
+        error: error instanceof Error ? error.message : '缓存清理失败。',
+      }))
+    }
+  }, [retainedCacheAssetIds])
 
   useEffect(() => {
     const bridge = window.desktopBridge
@@ -4036,6 +4149,13 @@ function App() {
     : null
   const clipRemoveDialog =
     videoClips.find((clip) => clip.id === clipRemoveDialogId) ?? null
+  const clipDeleteDialog =
+    videoClips.find((clip) => clip.id === clipDeleteDialogState?.clipId) ?? null
+  const clipDeleteReferenceCount = clipDeleteDialog
+    ? projectAssetRefs.filter(
+        (reference) => reference.assetId === clipDeleteDialog.assetId,
+      ).length
+    : 0
   const clipTagEditor =
     videoClips.find((clip) => clip.id === clipTagEditorId) ?? null
   const clipNoteEditor =
@@ -5856,6 +5976,33 @@ function App() {
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      const target = event.target
+      const editableTarget =
+        target instanceof Element &&
+        Boolean(
+          target.closest(
+            'input, textarea, select, [contenteditable="true"], [role="textbox"], [role="slider"]',
+          ),
+        )
+      const unmodifiedKey =
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.shiftKey
+
+      if (
+        clipDeleteDialogState !== null &&
+        event.key === 'Enter' &&
+        unmodifiedKey &&
+        !event.repeat &&
+        !clipDeleteDialogState.deleting
+      ) {
+        event.preventDefault()
+        event.stopPropagation()
+        void deleteClipFromAuroraRef.current()
+        return
+      }
+
       const projectOverlayOpen =
         createOpen ||
         emptyProjectPromptId !== null ||
@@ -5864,9 +6011,42 @@ function App() {
         clipMenuId !== null ||
         clipAddDialogId !== null ||
         clipRemoveDialogId !== null ||
+        clipDeleteDialogState !== null ||
         clipTagEditorId !== null ||
         clipNoteEditorId !== null ||
         clipAiMetadataDialog !== null
+      const activeModalOpen = Array.from(
+        document.querySelectorAll<HTMLElement>('[aria-modal="true"]'),
+      ).some(
+        (element) =>
+          !element.closest('[inert]') && element.getClientRects().length > 0,
+      )
+      if (
+        currentView === 'video-library' &&
+        selectedClip &&
+        unmodifiedKey &&
+        !event.repeat &&
+        !editableTarget &&
+        !projectOverlayOpen &&
+        !activeModalOpen &&
+        !searchOpen &&
+        !settingsPanelOpen &&
+        !accountCenterOpen &&
+        openClipFilterMenu === null &&
+        !startupGateActive &&
+        pageTransitionPhase === 'idle' &&
+        !document.fullscreenElement &&
+        (event.key === 'Delete' || event.key === 'Backspace')
+      ) {
+        event.preventDefault()
+        event.stopPropagation()
+        setClipDeleteDialogState({
+          clipId: selectedClip.id,
+          deleting: false,
+          error: null,
+        })
+        return
+      }
       if (
         currentView === 'gallery' &&
         !projectOverlayOpen &&
@@ -5900,6 +6080,7 @@ function App() {
         setClipMenuId(null)
         if (clipAddDialogId !== null) closeClipAddDialog()
         setClipRemoveDialogId(null)
+        if (!clipDeleteDialogState?.deleting) setClipDeleteDialogState(null)
         setClipTagEditorId(null)
         setClipTagDraft('')
         setClipTagEditorStatus('')
@@ -5922,17 +6103,25 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [
     animateProjectStep,
+    accountCenterOpen,
     clipAddDialogId,
     clipAiMetadataDialog,
     clipMenuId,
     clipNoteEditorId,
+    clipDeleteDialogState,
     clipRemoveDialogId,
     clipTagEditorId,
     createOpen,
     currentView,
     emptyProjectPromptId,
+    openClipFilterMenu,
+    pageTransitionPhase,
     projectMenu,
     projectDeleteDialogId,
+    searchOpen,
+    selectedClip,
+    settingsPanelOpen,
+    startupGateActive,
   ])
 
   useEffect(() => {
@@ -8111,6 +8300,7 @@ function App() {
         clipMenuId !== null ||
         clipAddDialogId !== null ||
         clipRemoveDialogId !== null ||
+        clipDeleteDialogState !== null ||
         clipTagEditorId !== null ||
         clipNoteEditorId !== null ||
         activeModalOpen ||
@@ -8126,6 +8316,7 @@ function App() {
   }, [
     accountCenterOpen,
     clipAddDialogId,
+    clipDeleteDialogState,
     clipMenuId,
     clipNoteEditorId,
     clipRemoveDialogId,
@@ -8841,6 +9032,158 @@ function App() {
       `已从“${selectedProject.title}”移除；原文件与视觉索引仍保留在 Aurora 中。`,
     )
   }
+
+  async function deleteClipFromAurora() {
+    const clip = clipDeleteDialog
+    if (
+      !clip ||
+      clipDeleteDialogState?.deleting ||
+      clipDeleteInFlightRef.current
+    ) return
+
+    const assetId = clip.assetId
+    const filename = clip.filename
+    const retainedSourceMessage = clip.online
+      ? `${getOnlineProviderLabel(clip.online.provider)}原视频不受影响。`
+      : '磁盘原视频仍保留。'
+    clipDeleteInFlightRef.current = true
+    setClipDeleteDialogState({
+      clipId: clip.id,
+      deleting: true,
+      error: null,
+    })
+
+    try {
+      await window.desktopBridge?.removeMediaAssetData(assetId)
+
+      const currentRecords = {
+        mediaAssets: mediaAssetsRef.current,
+        projectAssetRefs: projectAssetRefsRef.current,
+        visualIndexes: visualIndexesRef.current,
+        frameAnnotations: frameAnnotationsRef.current,
+        frameExclusions: frameExclusionsRef.current,
+      }
+      const nextRecords = removeMediaAssetRecords(currentRecords, assetId)
+      if (!nextRecords.removedAsset) {
+        throw new Error('素材记录已不存在')
+      }
+
+      const removedReferenceIds = new Set(
+        nextRecords.removedReferences.map((reference) => reference.id),
+      )
+      const affectedProjectIds = new Set(
+        nextRecords.removedReferences.map((reference) => reference.projectId),
+      )
+      const selectedProjectReferences = currentRecords.projectAssetRefs
+        .filter((reference) => reference.projectId === selectedProjectId)
+        .sort((left, right) => left.order - right.order)
+      const selectedReferenceIndex = selectedProjectReferences.findIndex(
+        (reference) => reference.id === selectedClipId,
+      )
+      const remainingSelectedProjectReferences = nextRecords.projectAssetRefs
+        .filter((reference) => reference.projectId === selectedProjectId)
+        .sort((left, right) => left.order - right.order)
+      const nextSelectedReference =
+        remainingSelectedProjectReferences[
+          Math.min(
+            Math.max(0, selectedReferenceIndex),
+            Math.max(0, remainingSelectedProjectReferences.length - 1),
+          )
+        ] ?? null
+      const updatedAt = formatProjectTimestamp()
+      const nextProjects = projectsRef.current.map((project) =>
+        affectedProjectIds.has(project.id)
+          ? { ...project, updatedAt }
+          : project,
+      )
+
+      projectsRef.current = nextProjects
+      mediaAssetsRef.current = nextRecords.mediaAssets
+      projectAssetRefsRef.current = nextRecords.projectAssetRefs
+      visualIndexesRef.current = nextRecords.visualIndexes
+      frameAnnotationsRef.current = nextRecords.frameAnnotations
+      frameExclusionsRef.current = nextRecords.frameExclusions
+      setProjects(nextProjects)
+      setMediaAssets(nextRecords.mediaAssets)
+      setProjectAssetRefs(nextRecords.projectAssetRefs)
+      setVisualIndexes(nextRecords.visualIndexes)
+      setFrameAnnotations(nextRecords.frameAnnotations)
+      setFrameExclusions(nextRecords.frameExclusions)
+
+      nextRecords.removedReferences.forEach((reference) => {
+        clearClipHoverScrub(reference.id)
+      })
+      for (const requestKey of previewRequestsRef.current.keys()) {
+        if (requestKey.startsWith(`${assetId}\u0000`)) {
+          previewRequestsRef.current.delete(requestKey)
+        }
+      }
+      for (const requestKey of lightweightPreviewRequestsRef.current.keys()) {
+        if (requestKey.startsWith(`${assetId}\u0000`)) {
+          lightweightPreviewRequestsRef.current.delete(requestKey)
+        }
+      }
+      importedMediaFilesRef.current.delete(assetId)
+      frameRingSmartUndoRef.current = null
+      clipAiMetadataRequestVersionRef.current += 1
+
+      setIndexProgressByAsset((current) =>
+        withoutRecordKey(current, assetId),
+      )
+      setPreviewProgressByAsset((current) =>
+        withoutRecordKey(current, assetId),
+      )
+      setPreviewPlaybackByAsset((current) =>
+        withoutRecordKey(current, assetId),
+      )
+      setLightweightPreviewByAsset((current) =>
+        withoutRecordKey(current, assetId),
+      )
+      setSelectedClipId((current) =>
+        current && removedReferenceIds.has(current)
+          ? nextSelectedReference?.id ?? null
+          : current,
+      )
+      setHoveredClipId((current) =>
+        current && removedReferenceIds.has(current) ? null : current,
+      )
+      setFrameRingFocusTarget((current) =>
+        current && removedReferenceIds.has(current.clipId) ? null : current,
+      )
+      setExternalVideoNavigationClipId((current) =>
+        current && removedReferenceIds.has(current) ? null : current,
+      )
+      setClipTagEditorId((current) =>
+        current && removedReferenceIds.has(current) ? null : current,
+      )
+      setClipNoteEditorId((current) =>
+        current && removedReferenceIds.has(current) ? null : current,
+      )
+      setClipAiMetadataDialog((current) =>
+        current && removedReferenceIds.has(current.clipId) ? null : current,
+      )
+      setDetailPreviewPlayingKey(null)
+      setDetailPreviewFailedSource(null)
+      setClipTrackPosition(0)
+      setClipOverscroll(0)
+      setEmptyProjectPromptId(null)
+      setClipDeleteDialogState(null)
+      showClipActionNotice(
+        `已从 Aurora 删除“${filename}”，相关缓存、视觉索引和帧环数据已清理；${retainedSourceMessage}`,
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '删除失败'
+      setClipDeleteDialogState((current) =>
+        current?.clipId === clip.id
+          ? { ...current, deleting: false, error: message }
+          : current,
+      )
+    } finally {
+      clipDeleteInFlightRef.current = false
+    }
+  }
+
+  deleteClipFromAuroraRef.current = deleteClipFromAurora
 
   function toggleClipFavorite(clip: VideoClip) {
     setMediaAssets((current) =>
@@ -11822,6 +12165,9 @@ function App() {
           onRemoveCustomParticleMedia={removeCustomParticleMedia}
           appUpdateState={appUpdateState}
           onCheckForUpdates={handleCheckForUpdates}
+          appCacheState={appCacheState}
+          onInspectAppCache={() => void inspectAppCache()}
+          onCleanAppCache={() => void cleanAppCache()}
           onChange={updateCurrentPageSettings}
           onParticlesChange={updateCurrentPageParticles}
         />
@@ -13472,6 +13818,25 @@ function App() {
                 </span>
                 <ChevronRight size={14} strokeWidth={1.45} />
               </button>
+              <button
+                className="uiGlassInset uiGlassInteractive destructive"
+                type="button"
+                onClick={() => {
+                  setClipMenuId(null)
+                  setClipDeleteDialogState({
+                    clipId: clipMenu.id,
+                    deleting: false,
+                    error: null,
+                  })
+                }}
+              >
+                <Trash2 size={17} strokeWidth={1.45} />
+                <span>
+                  <strong>从 Aurora 删除…</strong>
+                  <small>清除所有项目引用、缓存、视觉索引与帧环</small>
+                </span>
+                <ChevronRight size={14} strokeWidth={1.45} />
+              </button>
             </div>
           </section>
         </div>
@@ -13694,6 +14059,56 @@ function App() {
                 onClick={removeClipFromCurrentProject}
               >
                 从项目移除
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
+
+      {clipDeleteDialog && clipDeleteDialogState && (
+        <div
+          className="overlay clipRemoveOverlay"
+          role="alertdialog"
+          aria-modal="true"
+          aria-label={`从 Aurora 删除 ${clipDeleteDialog.filename}`}
+          data-camera-gesture="block"
+        >
+          <section className="clipRemovePanel uiGlassShell">
+            <span className="clipRemoveIcon" aria-hidden="true">
+              <Trash2 size={20} strokeWidth={1.45} />
+            </span>
+            <span className="sheetEyebrow">Delete From Aurora</span>
+            <h2>从 Aurora 删除？</h2>
+            <p>
+              “{clipDeleteDialog.filename}”在
+              {clipDeleteReferenceCount} 个项目中的引用，以及相关缓存、视觉索引和帧环数据都会被删除。
+              {clipDeleteDialog.online
+                ? `${getOnlineProviderLabel(clipDeleteDialog.online.provider)}上的原视频不会受到影响。`
+                : '磁盘上的原始视频仍会保留。'}
+              此操作无法撤销。
+            </p>
+            {clipDeleteDialogState.error && (
+              <p className="clipRemoveError" role="alert">
+                删除失败：{clipDeleteDialogState.error}
+              </p>
+            )}
+            <footer>
+              <button
+                className="secondaryAction uiGlassInset uiGlassInteractive"
+                type="button"
+                disabled={clipDeleteDialogState.deleting}
+                onClick={() => setClipDeleteDialogState(null)}
+              >
+                取消
+              </button>
+              <button
+                className="primaryAction destructive uiGlassInset uiGlassInteractive"
+                type="button"
+                autoFocus
+                disabled={clipDeleteDialogState.deleting}
+                onClick={() => void deleteClipFromAurora()}
+              >
+                {clipDeleteDialogState.deleting ? '正在清理…' : '从 Aurora 删除'}
               </button>
             </footer>
           </section>

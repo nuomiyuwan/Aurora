@@ -30,6 +30,7 @@ const DIRECT_MP4_PLAYBACK_CODECS = new Set(['av1', 'h264'])
 const DIRECT_WEBM_PLAYBACK_CODECS = new Set(['av1', 'vp8', 'vp9'])
 const UNAVAILABLE_FRAME_PTS = '9223372036854775807'
 const FRAME_STATS_FORMAT = '{n}|{ni}|{ptsi}|{tbi}|{ti}|{t}|{pts}|{tb}'
+const MEDIA_CACHE_DIRECTORY_PATTERN = /^[a-f0-9]{32}$/
 
 function mediaError(code, message, cause) {
   const error = new Error(message)
@@ -755,6 +756,44 @@ function mediaDirectoryHash(assetId) {
   return crypto.createHash('sha256').update(assetId).digest('hex').slice(0, 32)
 }
 
+function retainedAssetIdsFromRequest(request) {
+  const values = request?.retainedAssetIds
+  if (!Array.isArray(values) || values.length > 100_000) {
+    throw mediaError(
+      'MEDIA_INVALID_INPUT',
+      'A valid retained media asset list is required',
+    )
+  }
+  return new Set(values.map(validateAssetId))
+}
+
+async function directorySizeBytes(directoryPath) {
+  let entries
+  try {
+    entries = await fs.promises.readdir(directoryPath, { withFileTypes: true })
+  } catch (error) {
+    if (error?.code === 'ENOENT') return 0
+    throw error
+  }
+
+  let totalBytes = 0
+  for (const entry of entries) {
+    const entryPath = path.join(directoryPath, entry.name)
+    if (entry.isSymbolicLink()) continue
+    if (entry.isDirectory()) {
+      totalBytes += await directorySizeBytes(entryPath)
+      continue
+    }
+    if (!entry.isFile()) continue
+    try {
+      totalBytes += (await fs.promises.stat(entryPath)).size
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+    }
+  }
+  return totalBytes
+}
+
 function chooseMediaThumbnailTime(durationSeconds) {
   if (!Number.isFinite(durationSeconds) || durationSeconds < 0.5) return 0
   const latestSafeTime = Math.max(0, durationSeconds - 0.25)
@@ -1258,6 +1297,7 @@ function createMediaPipeline({ userDataPath, onProgress }) {
   const indexLocks = new Set()
   const previewTasks = new Map()
   const thumbnailTasks = new Map()
+  const removingAssetIds = new Set()
   let activeThumbnailTasks = 0
   const thumbnailWaiters = []
 
@@ -1305,6 +1345,12 @@ function createMediaPipeline({ userDataPath, onProgress }) {
   }
 
   async function withOperation(kind, request, context, task) {
+    if (context?.assetId && removingAssetIds.has(context.assetId)) {
+      throw mediaError(
+        'MEDIA_BUSY',
+        'This media asset is currently being removed',
+      )
+    }
     const operation = createOperation(
       registry,
       kind,
@@ -1316,6 +1362,144 @@ function createMediaPipeline({ userDataPath, onProgress }) {
       return await task(operation)
     } finally {
       registry.delete(operation.operationId)
+    }
+  }
+
+  async function removeMediaAssetData(request) {
+    const assetId = validateAssetId(request?.assetId)
+    if (removingAssetIds.has(assetId)) {
+      throw mediaError('MEDIA_BUSY', 'This media asset is already being removed')
+    }
+
+    removingAssetIds.add(assetId)
+    try {
+      for (const operation of registry.values()) {
+        if (operation.context?.assetId === assetId) operation.cancel()
+      }
+
+      const deadline = Date.now() + 5_000
+      while (
+        [...registry.values()].some(
+          (operation) => operation.context?.assetId === assetId,
+        )
+      ) {
+        if (Date.now() >= deadline) {
+          throw mediaError(
+            'MEDIA_BUSY',
+            'The media asset is still being processed',
+          )
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+
+      const mediaRoot = path.join(userDataPath, 'media')
+      const assetRoot = path.join(mediaRoot, mediaDirectoryHash(assetId))
+      let removed = false
+      try {
+        const stat = await fs.promises.stat(assetRoot)
+        removed = stat.isDirectory()
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+      }
+      await fs.promises.rm(assetRoot, { recursive: true, force: true })
+      return { assetId, removed }
+    } finally {
+      removingAssetIds.delete(assetId)
+    }
+  }
+
+  async function scanMediaCache(request) {
+    const retainedAssetIds = retainedAssetIdsFromRequest(request)
+    const protectedDirectoryNames = new Set(
+      [...retainedAssetIds].map(mediaDirectoryHash),
+    )
+    for (const operation of registry.values()) {
+      if (operation.context?.assetId) {
+        protectedDirectoryNames.add(
+          mediaDirectoryHash(operation.context.assetId),
+        )
+      }
+    }
+    for (const assetId of removingAssetIds) {
+      protectedDirectoryNames.add(mediaDirectoryHash(assetId))
+    }
+
+    const mediaRoot = path.join(userDataPath, 'media')
+    let entries
+    try {
+      entries = await fs.promises.readdir(mediaRoot, { withFileTypes: true })
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        return {
+          totalBytes: 0,
+          reclaimableBytes: 0,
+          totalDirectories: 0,
+          reclaimableDirectories: 0,
+          reclaimable: [],
+        }
+      }
+      throw error
+    }
+
+    const directories = await Promise.all(
+      entries
+        .filter(
+          (entry) =>
+            entry.isDirectory() &&
+            MEDIA_CACHE_DIRECTORY_PATTERN.test(entry.name),
+        )
+        .map(async (entry) => {
+          const directoryPath = path.join(mediaRoot, entry.name)
+          return {
+            name: entry.name,
+            path: directoryPath,
+            sizeBytes: await directorySizeBytes(directoryPath),
+            reclaimable: !protectedDirectoryNames.has(entry.name),
+          }
+        }),
+    )
+    const reclaimable = directories.filter((entry) => entry.reclaimable)
+    return {
+      totalBytes: directories.reduce(
+        (total, entry) => total + entry.sizeBytes,
+        0,
+      ),
+      reclaimableBytes: reclaimable.reduce(
+        (total, entry) => total + entry.sizeBytes,
+        0,
+      ),
+      totalDirectories: directories.length,
+      reclaimableDirectories: reclaimable.length,
+      reclaimable,
+    }
+  }
+
+  async function inspectMediaCache(request) {
+    const { reclaimable: _reclaimable, ...report } =
+      await scanMediaCache(request)
+    return report
+  }
+
+  async function cleanMediaCache(request) {
+    const before = await scanMediaCache(request)
+    let removedBytes = 0
+    let removedDirectories = 0
+    for (const directory of before.reclaimable) {
+      const active = [...registry.values()].some(
+        (operation) =>
+          operation.context?.assetId &&
+          mediaDirectoryHash(operation.context.assetId) === directory.name,
+      )
+      if (active) continue
+      await fs.promises.rm(directory.path, { recursive: true, force: true })
+      removedBytes += directory.sizeBytes
+      removedDirectories += 1
+    }
+    const after = await inspectMediaCache(request)
+    return {
+      ...after,
+      removedBytes,
+      removedDirectories,
     }
   }
 
@@ -2307,10 +2491,13 @@ function createMediaPipeline({ userDataPath, onProgress }) {
     buildVisualIndex,
     cancelAll,
     cancelOperation,
+    cleanMediaCache,
     createMediaThumbnail,
     ensureMediaPreview,
     exportClip,
     exportStill,
+    inspectMediaCache,
+    removeMediaAssetData,
   }
 }
 

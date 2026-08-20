@@ -23,6 +23,10 @@ import {
 import {
   drawFavoritesDomReflectionTexture,
 } from './drawFavoritesDomReflectionTexture'
+import {
+  getFavoritesCarouselSlots,
+  type FavoritesCarouselDirection,
+} from './favoritesCarouselLayout'
 import { getFavoritesCardStyle } from './favoritesCardTuning'
 import {
   FAVORITES_CARD_HOLDER_LIFT_TO_CARD_WIDTH,
@@ -118,24 +122,6 @@ const normalizeFrameRating = (rating?: number) =>
 
 const wrapIndex = (index: number, count: number) =>
   count > 0 ? (index + count) % count : 0
-
-const getRelativeIndex = (index: number, activeIndex: number, count: number) => {
-  if (count <= 1) return 0
-  let relative = index - activeIndex
-  while (relative > count / 2) relative -= count
-  while (relative < -count / 2) relative += count
-  return relative
-}
-
-const getFavoritesCarouselOffsets = (
-  itemCount: number,
-  realtimeMotion: boolean,
-) => {
-  if (itemCount < 5) return null
-  return realtimeMotion
-    ? [-3, -2, -1, 0, 1, 2, 3]
-    : [-2, -1, 0, 1, 2]
-}
 
 const createReflectionProject = (
   item: FavoriteGalleryItem,
@@ -264,6 +250,8 @@ export function FavoritesGalleryView({
   const [isCardDragging, setIsCardDragging] = useState(false)
   const [isCardReleasing, setIsCardReleasing] = useState(false)
   const [isCardRecycling, setIsCardRecycling] = useState(false)
+  const [motionDirection, setMotionDirection] =
+    useState<FavoritesCarouselDirection>(0)
   const [releaseDuration, setReleaseDuration] = useState(
     FAVORITES_STEP_RELEASE_DURATION_MS,
   )
@@ -322,6 +310,8 @@ export function FavoritesGalleryView({
   )
 
   const updateDragProgress = (nextProgress: number) => {
+    if (nextProgress < 0) setMotionDirection(-1)
+    if (nextProgress > 0) setMotionDirection(1)
     dragProgressRef.current = nextProgress
     setDragProgress(nextProgress)
   }
@@ -373,6 +363,7 @@ export function FavoritesGalleryView({
     setIsCardDragging(false)
     setIsCardReleasing(false)
     setIsCardRecycling(false)
+    setMotionDirection(0)
   }, [activeFilter])
 
   useEffect(() => {
@@ -427,6 +418,8 @@ export function FavoritesGalleryView({
 
     const resolvedTarget = clamp(targetProgress, -1, 1)
     const step = resolvedTarget < 0 ? 1 : resolvedTarget > 0 ? -1 : 0
+    if (resolvedTarget < 0) setMotionDirection(-1)
+    if (resolvedTarget > 0) setMotionDirection(1)
     const resolvedDuration = Math.round(clamp(
       duration,
       FAVORITES_RELEASE_MIN_DURATION_MS,
@@ -453,6 +446,7 @@ export function FavoritesGalleryView({
           }
           setIsCardReleasing(false)
           updateDragProgress(0)
+          setMotionDirection(0)
           suppressClickRef.current = false
           releaseTimerRef.current = undefined
 
@@ -519,6 +513,7 @@ export function FavoritesGalleryView({
     }
     event.stopPropagation()
     resetWheelGesture()
+    setMotionDirection(0)
     try {
       event.currentTarget.setPointerCapture(event.pointerId)
     } catch {
@@ -758,46 +753,43 @@ export function FavoritesGalleryView({
   const renderedCards = useMemo(
     () => {
       const keepMotionEdgeVisible = isCardDragging || isCardReleasing
-      const carouselOffsets = getFavoritesCarouselOffsets(
+      const carouselSlots = getFavoritesCarouselSlots(
         visibleItems.length,
         keepMotionEdgeVisible,
+        motionDirection,
+        dragProgress,
       )
 
-      if (carouselOffsets) {
-        return carouselOffsets.map((carouselOffset) => {
-          const index = wrapIndex(
-            activeIndex + carouselOffset,
-            visibleItems.length,
-          )
-          const item = visibleItems[index]
-          const relative = carouselOffset + dragProgress
-          return {
-            carouselKey: `favorites-slot-${carouselOffset}`,
-            carouselOffset,
-            item,
-            index,
-            relative,
-            style: getFavoritesCardStyle(relative, keepMotionEdgeVisible),
-          }
-        })
-      }
-
-      return visibleItems.flatMap((item, index) => {
-        const relative =
-          getRelativeIndex(index, activeIndex, visibleItems.length) +
-          dragProgress
-        if (Math.abs(relative) > 2.85) return []
-        return [{
-          carouselKey: `favorites-item-${item.id}`,
-          carouselOffset: relative - dragProgress,
+      return carouselSlots.map(({ offset, opacityScale, transient }) => {
+        const index = wrapIndex(
+          activeIndex + offset,
+          visibleItems.length,
+        )
+        const item = visibleItems[index]
+        const relative = offset + dragProgress
+        return {
+          carouselKey: `favorites-slot-${offset}`,
+          carouselOffset: offset,
           item,
           index,
           relative,
-          style: getFavoritesCardStyle(relative, keepMotionEdgeVisible),
-        }]
+          transient,
+          style: getFavoritesCardStyle(
+            relative,
+            keepMotionEdgeVisible,
+            opacityScale,
+          ),
+        }
       })
     },
-    [activeIndex, dragProgress, isCardDragging, isCardReleasing, visibleItems],
+    [
+      activeIndex,
+      dragProgress,
+      isCardDragging,
+      isCardReleasing,
+      motionDirection,
+      visibleItems,
+    ],
   )
   const reflectionProjects = useMemo<Project[]>(
     () =>
@@ -936,8 +928,12 @@ export function FavoritesGalleryView({
               index,
               relative,
               style,
+              transient,
             }) => {
-              const isSelected = index === activeIndex && Math.abs(dragProgress) < 0.5
+              const isSelected =
+                !transient &&
+                carouselOffset === 0 &&
+                Math.abs(dragProgress) < 0.5
               const isPreviewFavorite = previewFavoriteIds.has(item.id)
               const favorite = item.source.type === 'preview'
                 ? isPreviewFavorite
@@ -952,6 +948,7 @@ export function FavoritesGalleryView({
                   data-item-index={index}
                   data-item-kind={item.kind}
                   data-item-rating={item.rating ?? undefined}
+                  data-transient={transient || undefined}
                   data-selected={isSelected || undefined}
                   data-relative={relative.toFixed(3)}
                   style={{ ...style, pointerEvents: 'none' }}
@@ -970,7 +967,7 @@ export function FavoritesGalleryView({
 
         <div className="favoritesGalleryHitCamera">
           <div className="favoritesGalleryHitLayer">
-            {renderedCards.map(({
+            {renderedCards.filter(({ transient }) => !transient).map(({
               carouselKey,
               carouselOffset,
               item,

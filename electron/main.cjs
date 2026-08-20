@@ -45,6 +45,7 @@ const { createWindowRevealGate } = require('./windowRevealGate.cjs')
 const { toggleWindowFullscreen } = require('./windowControls.cjs')
 const { createExternalVideoOpenBroker } = require('./externalVideoOpen.cjs')
 const { createAppUpdateManager } = require('./appUpdater.cjs')
+const { cleanupAppUpdateCache } = require('./appUpdateCacheCleanup.cjs')
 const { createMacDmgInstaller } = require('./macDmgUpdate.cjs')
 const {
   createOnlineProviderRegistry,
@@ -769,6 +770,26 @@ function ensureMainWindow() {
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
   if (process.platform === 'win32') Menu.setApplicationMenu(null)
 
+  if (
+    app.isPackaged &&
+    (process.platform === 'darwin' || process.platform === 'win32')
+  ) {
+    try {
+      const cleanupResult = await cleanupAppUpdateCache({
+        platform: process.platform,
+        currentVersion: app.getVersion(),
+        userDataPath: app.getPath('userData'),
+      })
+      if (cleanupResult.removedFiles > 0) {
+        console.info(
+          `[Aurora updater] Cleared ${cleanupResult.removedFiles} stale update cache files`,
+        )
+      }
+    } catch (error) {
+      console.warn('[Aurora updater] Unable to clear stale update cache', error)
+    }
+  }
+
   const macDmgInstaller = process.platform === 'darwin'
     ? createMacDmgInstaller({
         userDataPath: app.getPath('userData'),
@@ -1123,6 +1144,46 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
 
   ipcMain.handle('media-thumbnail:create', async (_event, request) => {
     return mediaPipeline.createMediaThumbnail(request)
+  })
+
+  ipcMain.handle('media-asset-data:remove', async (_event, request) => {
+    const media = await mediaPipeline.removeMediaAssetData(request)
+    const semanticIndex = await aiVisualSearchService.removeAssetCache(request)
+    return {
+      assetId: media.assetId,
+      cacheRemoved: media.removed,
+      semanticEntriesRemoved: semanticIndex.removedEntries,
+    }
+  })
+
+  ipcMain.handle('app-cache:inspect', async (_event, request) => {
+    const [media, semantic] = await Promise.all([
+      mediaPipeline.inspectMediaCache(request),
+      aiVisualSearchService.inspectCache(request),
+    ])
+    return {
+      ...media,
+      semanticEntries: semantic.totalEntries,
+      reclaimableSemanticEntries: semantic.reclaimableEntries,
+    }
+  })
+
+  ipcMain.handle('app-cache:clean', async (_event, request) => {
+    const [media, semantic] = await Promise.all([
+      mediaPipeline.cleanMediaCache(request),
+      aiVisualSearchService.cleanCache(request),
+    ])
+    return {
+      totalBytes: media.totalBytes,
+      reclaimableBytes: media.reclaimableBytes,
+      totalDirectories: media.totalDirectories,
+      reclaimableDirectories: media.reclaimableDirectories,
+      semanticEntries: semantic.totalEntries,
+      reclaimableSemanticEntries: semantic.reclaimableEntries,
+      removedBytes: media.removedBytes,
+      removedDirectories: media.removedDirectories,
+      removedSemanticEntries: semantic.removedEntries,
+    }
   })
 
   ipcMain.handle('media-directory:select', async (_event, options = {}) => {

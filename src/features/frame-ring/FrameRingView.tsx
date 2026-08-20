@@ -61,6 +61,7 @@ import {
   LOCAL_PLAYER_KEYBOARD_SEEK_SECONDS,
   LOCAL_PLAYER_KEYBOARD_VOLUME_STEP,
   resolveLocalPlayerTrackpadSeekDelta,
+  shouldRestartLocalPlayerPlayback,
 } from './frameRingPlayerInput'
 import { getFrameRingVideoCrossOrigin } from './frameRingLiveReflection'
 import {
@@ -997,7 +998,7 @@ export function FrameRingView({
       return
     }
 
-    const restartThreshold = playbackEndSeconds - 1 / playerFps
+    const frameDurationSeconds = 1 / playerFps
     const video = previewVideoRef.current
     if (hasPlayableVideo && video) {
       if (!video.paused) {
@@ -1006,8 +1007,13 @@ export function FrameRingView({
       }
 
       const nextTime =
-        video.currentTime < playbackStartSeconds ||
-        video.currentTime >= restartThreshold
+        shouldRestartLocalPlayerPlayback({
+          currentTime: video.currentTime,
+          startSeconds: playbackStartSeconds,
+          endSeconds: playbackEndSeconds,
+          frameDurationSeconds,
+          ended: video.ended,
+        })
           ? playbackStartSeconds
           : video.currentTime
       video.currentTime = nextTime
@@ -1020,10 +1026,13 @@ export function FrameRingView({
       return
     }
 
-    if (
-      playerTimeSeconds < playbackStartSeconds ||
-      playerTimeSeconds >= restartThreshold
-    ) {
+    if (shouldRestartLocalPlayerPlayback({
+      currentTime: playerTimeSeconds,
+      startSeconds: playbackStartSeconds,
+      endSeconds: playbackEndSeconds,
+      frameDurationSeconds,
+      ended: false,
+    })) {
       setPlayerTimeSeconds(playbackStartSeconds)
       setWindowControlsVisible(false)
       setIsPlayerPlaying(true)

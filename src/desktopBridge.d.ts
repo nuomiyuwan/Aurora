@@ -483,6 +483,27 @@ declare global {
     createdAt: string
   }
 
+  interface MediaAssetDataRemovalResult {
+    assetId: string
+    cacheRemoved: boolean
+    semanticEntriesRemoved: number
+  }
+
+  interface AppCacheReport {
+    totalBytes: number
+    reclaimableBytes: number
+    totalDirectories: number
+    reclaimableDirectories: number
+    semanticEntries: number
+    reclaimableSemanticEntries: number
+  }
+
+  interface AppCacheCleanupResult extends AppCacheReport {
+    removedBytes: number
+    removedDirectories: number
+    removedSemanticEntries: number
+  }
+
   interface VisualIndexFrame {
     id: string
     index: number
@@ -926,6 +947,9 @@ declare global {
     createMediaThumbnail(
       request: MediaThumbnailRequest,
     ): Promise<MediaThumbnailResult>
+    removeMediaAssetData(assetId: string): Promise<MediaAssetDataRemovalResult>
+    inspectAppCache(retainedAssetIds: string[]): Promise<AppCacheReport>
+    cleanAppCache(retainedAssetIds: string[]): Promise<AppCacheCleanupResult>
     importParticleAsset(file: File): Promise<ImportedParticleAsset>
     removeParticleAsset(managedPath: string): Promise<boolean>
     validateParticleAsset(

@@ -68,7 +68,7 @@ test('仅在接近当前结果末端且仍有下一页时预取', () => {
   expect(
     shouldPrefetchNextBilibiliPage({
       resultCount: 18,
-      windowStart: 5,
+      windowStart: 1,
       windowSize: 9,
       hasMore: true,
       loading: false,
@@ -78,7 +78,7 @@ test('仅在接近当前结果末端且仍有下一页时预取', () => {
   expect(
     shouldPrefetchNextBilibiliPage({
       resultCount: 18,
-      windowStart: 6,
+      windowStart: 2,
       windowSize: 9,
       hasMore: true,
       loading: false,

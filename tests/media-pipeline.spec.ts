@@ -59,10 +59,133 @@ const { createMediaPipeline } = require('../electron/mediaPipeline.cjs') as {
       usesPreviewProxy: boolean
       version: number
     }>
+    removeMediaAssetData: (request: {
+      assetId: string
+    }) => Promise<{
+      assetId: string
+      removed: boolean
+    }>
+    inspectMediaCache: (request: {
+      retainedAssetIds: string[]
+    }) => Promise<{
+      totalBytes: number
+      reclaimableBytes: number
+      totalDirectories: number
+      reclaimableDirectories: number
+    }>
+    cleanMediaCache: (request: {
+      retainedAssetIds: string[]
+    }) => Promise<{
+      totalBytes: number
+      reclaimableBytes: number
+      totalDirectories: number
+      reclaimableDirectories: number
+      removedBytes: number
+      removedDirectories: number
+    }>
   }
 }
 
 const execFile = promisify(execFileCallback)
+
+test('removing a media asset deletes only its managed cache tree', async () => {
+  const testDirectory = await mkdtemp(
+    path.join(os.tmpdir(), 'aurora-media-removal-test-'),
+  )
+  const userDataPath = path.join(testDirectory, 'user-data')
+  const sourcePath = path.join(testDirectory, 'source.mp4')
+  const removedAssetId = 'asset-to-remove'
+  const retainedAssetId = 'asset-to-retain'
+  const mediaRoot = path.join(userDataPath, 'media')
+  const assetDirectory = (assetId: string) =>
+    path.join(
+      mediaRoot,
+      createHash('sha256').update(assetId).digest('hex').slice(0, 32),
+    )
+  const removedDirectory = assetDirectory(removedAssetId)
+  const retainedDirectory = assetDirectory(retainedAssetId)
+
+  try {
+    await mkdir(path.join(removedDirectory, 'index', 'v4'), {
+      recursive: true,
+    })
+    await mkdir(path.join(removedDirectory, 'lightweight-preview', 'v2'), {
+      recursive: true,
+    })
+    await mkdir(path.join(retainedDirectory, 'index', 'v4'), {
+      recursive: true,
+    })
+    await writeFile(path.join(removedDirectory, 'index', 'v4', 'frame.jpg'), 'frame')
+    await writeFile(
+      path.join(removedDirectory, 'lightweight-preview', 'v2', 'preview.mp4'),
+      'preview',
+    )
+    await writeFile(path.join(retainedDirectory, 'index', 'v4', 'frame.jpg'), 'keep')
+    await writeFile(sourcePath, 'original')
+
+    const pipeline = createMediaPipeline({ userDataPath })
+    await expect(
+      pipeline.removeMediaAssetData({ assetId: removedAssetId }),
+    ).resolves.toEqual({ assetId: removedAssetId, removed: true })
+    expect(existsSync(removedDirectory)).toBe(false)
+    expect(existsSync(retainedDirectory)).toBe(true)
+    expect(existsSync(sourcePath)).toBe(true)
+  } finally {
+    await rm(testDirectory, { recursive: true, force: true })
+  }
+})
+
+test('cache cleanup removes only unreferenced Aurora media directories', async () => {
+  const testDirectory = await mkdtemp(
+    path.join(os.tmpdir(), 'aurora-media-cache-cleanup-test-'),
+  )
+  const userDataPath = path.join(testDirectory, 'user-data')
+  const mediaRoot = path.join(userDataPath, 'media')
+  const retainedAssetId = 'retained-cache-asset'
+  const orphanAssetId = 'orphan-cache-asset'
+  const assetDirectory = (assetId: string) =>
+    path.join(
+      mediaRoot,
+      createHash('sha256').update(assetId).digest('hex').slice(0, 32),
+    )
+  const retainedDirectory = assetDirectory(retainedAssetId)
+  const orphanDirectory = assetDirectory(orphanAssetId)
+  const ignoredDirectory = path.join(mediaRoot, 'manual-files')
+
+  try {
+    await mkdir(retainedDirectory, { recursive: true })
+    await mkdir(orphanDirectory, { recursive: true })
+    await mkdir(ignoredDirectory, { recursive: true })
+    await writeFile(path.join(retainedDirectory, 'preview.mp4'), 'retained')
+    await writeFile(path.join(orphanDirectory, 'preview.mp4'), 'orphan')
+    await writeFile(path.join(ignoredDirectory, 'keep.txt'), 'keep')
+
+    const pipeline = createMediaPipeline({ userDataPath })
+    await expect(
+      pipeline.inspectMediaCache({ retainedAssetIds: [retainedAssetId] }),
+    ).resolves.toEqual({
+      totalBytes: 14,
+      reclaimableBytes: 6,
+      totalDirectories: 2,
+      reclaimableDirectories: 1,
+    })
+    await expect(
+      pipeline.cleanMediaCache({ retainedAssetIds: [retainedAssetId] }),
+    ).resolves.toEqual({
+      totalBytes: 8,
+      reclaimableBytes: 0,
+      totalDirectories: 1,
+      reclaimableDirectories: 0,
+      removedBytes: 6,
+      removedDirectories: 1,
+    })
+    expect(existsSync(retainedDirectory)).toBe(true)
+    expect(existsSync(orphanDirectory)).toBe(false)
+    expect(existsSync(ignoredDirectory)).toBe(true)
+  } finally {
+    await rm(testDirectory, { recursive: true, force: true })
+  }
+})
 
 function resolveMediaTool(name: 'ffmpeg' | 'ffprobe'): string | null {
   const environmentPath =

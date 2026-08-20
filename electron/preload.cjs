@@ -76,6 +76,12 @@ contextBridge.exposeInMainWorld('desktopBridge', {
   inspectMediaFile: (filePath) => ipcRenderer.invoke('media-file:inspect', filePath),
   createMediaThumbnail: (request) =>
     ipcRenderer.invoke('media-thumbnail:create', request),
+  removeMediaAssetData: (assetId) =>
+    ipcRenderer.invoke('media-asset-data:remove', { assetId }),
+  inspectAppCache: (retainedAssetIds) =>
+    ipcRenderer.invoke('app-cache:inspect', { retainedAssetIds }),
+  cleanAppCache: (retainedAssetIds) =>
+    ipcRenderer.invoke('app-cache:clean', { retainedAssetIds }),
   importParticleAsset: (file) => {
     let filePath = ''
     try {

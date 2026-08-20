@@ -130,6 +130,7 @@ const sampleManualPose = (relative: number): SampledCardPose => {
 export const getFavoritesCardStyle = (
   relative: number,
   keepMotionEdgeVisible = false,
+  opacityScale = 1,
 ) => {
   const magnitude = Math.abs(relative)
   const pose = sampleManualPose(relative)
@@ -137,6 +138,7 @@ export const getFavoritesCardStyle = (
   const saturation = clamp(1 - magnitude * 0.11, 0.66, 1)
   const brightness = clamp(1 - magnitude * 0.12, 0.68, 1)
   const opacity = clamp(1 - Math.max(0, magnitude - 2.05) * 1.7, 0, 1)
+  const resolvedOpacityScale = clamp(opacityScale, 0, 1)
 
   return {
     '--favorite-card-x': `${pose.xVw}vw`,
@@ -147,11 +149,13 @@ export const getFavoritesCardStyle = (
     '--favorite-card-blur': `${blur}px`,
     '--favorite-card-saturation': saturation,
     '--favorite-card-brightness': brightness,
-    '--favorite-card-opacity': opacity,
+    '--favorite-card-opacity': opacity * resolvedOpacityScale,
     '--favorite-card-z': Math.round(1000 - magnitude * 120),
-    '--reflection-opacity': 1,
-    '--reflection-slot-opacity': clamp(0.88 - magnitude * 0.16, 0.44, 0.88),
-    '--reflection-light-opacity': magnitude < 0.5 ? 1 : 0.82,
+    '--reflection-opacity': resolvedOpacityScale,
+    '--reflection-slot-opacity':
+      clamp(0.88 - magnitude * 0.16, 0.44, 0.88) * resolvedOpacityScale,
+    '--reflection-light-opacity':
+      (magnitude < 0.5 ? 1 : 0.82) * resolvedOpacityScale,
     '--reflection-blur-texels': Math.max(0, magnitude - 0.3) * 0.38,
     pointerEvents: magnitude <= 2.55 ? 'auto' : 'none',
     visibility:

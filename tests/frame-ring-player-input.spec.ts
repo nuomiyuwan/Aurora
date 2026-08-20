@@ -12,6 +12,7 @@ test('maps local-player keyboard and horizontal trackpad input to bounded seekin
       LOCAL_PLAYER_KEYBOARD_SEEK_SECONDS,
       LOCAL_PLAYER_KEYBOARD_VOLUME_STEP,
       resolveLocalPlayerTrackpadSeekDelta,
+      shouldRestartLocalPlayerPlayback,
     } = await import(
       '/src/features/frame-ring/frameRingPlayerInput.ts'
     )
@@ -50,6 +51,20 @@ test('maps local-player keyboard and horizontal trackpad input to bounded seekin
         120,
         900,
       ),
+      nativeEndBeforeMetadataEnd: shouldRestartLocalPlayerPlayback({
+        currentTime: 13.8,
+        startSeconds: 0,
+        endSeconds: 14,
+        frameDurationSeconds: 1 / 60,
+        ended: true,
+      }),
+      ordinaryPausedPosition: shouldRestartLocalPlayerPlayback({
+        currentTime: 8,
+        startSeconds: 0,
+        endSeconds: 14,
+        frameDurationSeconds: 1 / 60,
+        ended: false,
+      }),
     }
   })
 
@@ -67,6 +82,8 @@ test('maps local-player keyboard and horizontal trackpad input to bounded seekin
     reverseTrackpad: 5,
     verticalGesture: null,
     pinchGesture: null,
+    nativeEndBeforeMetadataEnd: true,
+    ordinaryPausedPosition: false,
   })
 })
 

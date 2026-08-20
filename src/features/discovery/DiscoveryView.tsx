@@ -99,8 +99,6 @@ type DiscoverySnakeTransition = {
   toWindowStart: number
   fromOrderIds: string[]
   toOrderIds: string[]
-  enteringId: string
-  leavingId: string
   renderedOrderIds: string[]
   sequence: number
 }
@@ -154,7 +152,7 @@ const DISCOVERY_CORRIDOR_GUARD_DISTANCE = 0.5
 const DISCOVERY_RESULT_CORRIDOR_ENABLED = false
 // Changing this value remounts the result-card rig after a Fast Refresh. This
 // prevents a cancelled corridor frame from surviving as stale inline geometry.
-const DISCOVERY_RESULT_LAYOUT_REVISION = 5
+const DISCOVERY_RESULT_LAYOUT_REVISION = 6
 const DISCOVERY_IMAGE_PRELOAD_TIMEOUT_MS = 6_000
 const DISCOVERY_PRELOAD_CACHE_LIMIT = 96
 const DOUYIN_DISCOVERY_RECOVERY_DELAYS_MS = [700, 1_600, 3_600] as const
@@ -393,19 +391,6 @@ const CARD_SLOTS = [
     opacity: 1,
   },
   {
-    x: 310,
-    y: 381.43,
-    width: 400,
-    rotateY: 15,
-    rotateZ: 0,
-    depth: 150,
-    order: 50,
-    layer: 1,
-    brightness: 0.9,
-    saturation: 0.9,
-    opacity: 1,
-  },
-  {
     x: 940,
     y: 381.43,
     width: 400,
@@ -414,6 +399,19 @@ const CARD_SLOTS = [
     depth: 150,
     order: 50,
     layer: 2,
+    brightness: 0.9,
+    saturation: 0.9,
+    opacity: 1,
+  },
+  {
+    x: 310,
+    y: 381.43,
+    width: 400,
+    rotateY: 15,
+    rotateZ: 0,
+    depth: 150,
+    order: 50,
+    layer: 1,
     brightness: 0.9,
     saturation: 0.9,
     opacity: 1,
@@ -471,19 +469,6 @@ const CARD_SLOTS = [
     opacity: 1,
   },
   {
-    x: 200,
-    y: 55,
-    width: 320,
-    rotateY: 8,
-    rotateZ: -0.6,
-    depth: -600,
-    order: 8,
-    layer: 4,
-    brightness: 0.3,
-    saturation: 0.5,
-    opacity: 1,
-  },
-  {
     x: 890,
     y: 55,
     width: 300,
@@ -496,9 +481,25 @@ const CARD_SLOTS = [
     saturation: 0.5,
     opacity: 1,
   },
+  {
+    x: 200,
+    y: 55,
+    width: 320,
+    rotateY: 8,
+    rotateZ: -0.6,
+    depth: -600,
+    order: 8,
+    layer: 4,
+    brightness: 0.3,
+    saturation: 0.5,
+    opacity: 1,
+  },
 ] as const satisfies readonly DiscoveryCardLayout[]
 
 type DiscoveryCardSlot = DiscoveryCardLayout
+
+const getDiscoveryMaximumWindowStart = (resultCount: number) =>
+  Math.max(0, resultCount - 1)
 
 const DISCOVERY_FRONT_DEPTH = Math.max(
   ...CARD_SLOTS.map((slot) => slot.depth),
@@ -2131,9 +2132,8 @@ export function DiscoveryView({
     pointerState.axis = null
     setIsResultPointerDragging(false)
     const orderedIds = spatialOrderIdsRef.current
-    const maximumWindowStart = Math.max(
-      0,
-      orderedIds.length - CARD_SLOTS.length,
+    const maximumWindowStart = getDiscoveryMaximumWindowStart(
+      orderedIds.length,
     )
     const settledWindowStart = Math.max(
       0,
@@ -2549,9 +2549,8 @@ export function DiscoveryView({
       const pendingDirection = Math.sign(
         pendingSnakeStepsRef.current,
       ) as DiscoverySnakeDirection | 0
-      const maximumWindowStart = Math.max(
-        0,
-        spatialOrderIdsRef.current.length - CARD_SLOTS.length,
+      const maximumWindowStart = getDiscoveryMaximumWindowStart(
+        spatialOrderIdsRef.current.length,
       )
       const canContinue =
         pendingDirection !== 0 &&
@@ -2916,9 +2915,8 @@ export function DiscoveryView({
 
   const applyCorridorPosition = (position: number) => {
     const orderedIds = spatialOrderIdsRef.current
-    const maximumPosition = Math.max(
-      0,
-      orderedIds.length - CARD_SLOTS.length,
+    const maximumPosition = getDiscoveryMaximumWindowStart(
+      orderedIds.length,
     )
     const clampedPosition = Math.max(
       0,
@@ -2958,9 +2956,8 @@ export function DiscoveryView({
 
   const commitCorridorPosition = (position: number) => {
     const orderedIds = spatialOrderIdsRef.current
-    const maximumPosition = Math.max(
-      0,
-      orderedIds.length - CARD_SLOTS.length,
+    const maximumPosition = getDiscoveryMaximumWindowStart(
+      orderedIds.length,
     )
     const settledIndex = Math.max(
       0,
@@ -3014,9 +3011,8 @@ export function DiscoveryView({
       corridorPositionRafRef.current = null
       applyCorridorPosition(corridorPositionRef.current)
     }
-    const maximumPosition = Math.max(
-      0,
-      spatialOrderIdsRef.current.length - CARD_SLOTS.length,
+    const maximumPosition = getDiscoveryMaximumWindowStart(
+      spatialOrderIdsRef.current.length,
     )
     const target = Math.max(
       0,
@@ -3198,9 +3194,8 @@ export function DiscoveryView({
     wheelState.active = false
     corridorWheelReleaseTimerRef.current = null
     cancelCorridorPreview()
-    const maximumPosition = Math.max(
-      0,
-      spatialOrderIdsRef.current.length - CARD_SLOTS.length,
+    const maximumPosition = getDiscoveryMaximumWindowStart(
+      spatialOrderIdsRef.current.length,
     )
     const snapTarget = Math.max(
       0,
@@ -3221,7 +3216,7 @@ export function DiscoveryView({
   ) => {
     if (
       event.ctrlKey ||
-      spatialOrderIdsRef.current.length <= CARD_SLOTS.length ||
+      spatialOrderIdsRef.current.length <= 1 ||
       isSearching ||
       isCameraDragging ||
       snakeLockRef.current ||
@@ -3245,12 +3240,7 @@ export function DiscoveryView({
       wheelState.active ? wheelState.axis : null,
     )
     if (!sample || (!wheelState.active && !sample.moves)) return
-    /*
-     * WheelEvent delta is the scroll direction, which is opposite the finger
-     * travel used by macOS natural scrolling. Flip it so the authored card
-     * track follows the two-finger gesture just like direct pointer dragging.
-     */
-    const trackpadDelta = -sample.delta
+    const trackpadDelta = sample.delta
 
     const now = performance.now()
     if (!wheelState.active) {
@@ -3284,9 +3274,8 @@ export function DiscoveryView({
     event.preventDefault()
     event.stopPropagation()
     if (sample.moves) {
-      const maximumPosition = Math.max(
-        0,
-        spatialOrderIdsRef.current.length - CARD_SLOTS.length,
+      const maximumPosition = getDiscoveryMaximumWindowStart(
+        spatialOrderIdsRef.current.length,
       )
       const previousRawPosition = wheelState.rawPosition
       const positionDelta =
@@ -3345,9 +3334,8 @@ export function DiscoveryView({
     }
 
     const orderedIds = spatialOrderIdsRef.current
-    const maximumWindowStart = Math.max(
-      0,
-      orderedIds.length - CARD_SLOTS.length,
+    const maximumWindowStart = getDiscoveryMaximumWindowStart(
+      orderedIds.length,
     )
     const fromWindowStart = Math.max(
       0,
@@ -3372,21 +3360,10 @@ export function DiscoveryView({
       toWindowStart,
       toWindowStart + CARD_SLOTS.length,
     )
-    if (
-      fromOrderIds.length !== CARD_SLOTS.length ||
-      toOrderIds.length !== CARD_SLOTS.length
-    ) {
+    if (fromOrderIds.length === 0 || toOrderIds.length === 0) {
       return
     }
 
-    const enteringId =
-      direction > 0
-        ? toOrderIds[toOrderIds.length - 1]
-        : toOrderIds[0]
-    const leavingId =
-      direction > 0
-        ? fromOrderIds[0]
-        : fromOrderIds[fromOrderIds.length - 1]
     const renderedOrderIds = orderedIds.slice(
       Math.min(fromWindowStart, toWindowStart),
       Math.max(fromWindowStart, toWindowStart) + CARD_SLOTS.length,
@@ -3433,8 +3410,6 @@ export function DiscoveryView({
       toWindowStart,
       fromOrderIds,
       toOrderIds,
-      enteringId,
-      leavingId,
       renderedOrderIds,
       sequence,
     })
@@ -3492,7 +3467,7 @@ export function DiscoveryView({
     if (
       DISCOVERY_RESULT_CORRIDOR_ENABLED ||
       event.ctrlKey ||
-      spatialOrderIdsRef.current.length <= CARD_SLOTS.length ||
+      spatialOrderIdsRef.current.length <= 1 ||
       isSearching ||
       isCameraDragging ||
       corridorWheelStateRef.current.active ||
@@ -4560,7 +4535,7 @@ export function DiscoveryView({
     if (
       !hitTarget ||
       hitTarget.disabled ||
-      spatialOrderIdsRef.current.length <= CARD_SLOTS.length ||
+      spatialOrderIdsRef.current.length <= 1 ||
       isSearching ||
       isCameraDragging ||
       isCorridorMoving ||
@@ -4609,7 +4584,7 @@ export function DiscoveryView({
         return
       }
       if (
-        spatialOrderIdsRef.current.length <= CARD_SLOTS.length ||
+        spatialOrderIdsRef.current.length <= 1 ||
         isSearching ||
         isCameraDragging ||
         snakeLockRef.current ||
@@ -4670,17 +4645,15 @@ export function DiscoveryView({
     const pointerDelta = axis === 'x'
       ? event.clientX - pointerState.lastX
       : event.clientY - pointerState.lastY
-    /* Direct manipulation: the authored card track follows the pointer. */
     const positionDelta =
-      pointerDelta / DISCOVERY_SNAKE_WHEEL_THRESHOLD
+      -pointerDelta / DISCOVERY_SNAKE_WHEEL_THRESHOLD
     pointerState.lastX = event.clientX
     pointerState.lastY = event.clientY
     pointerState.lastTime = now
 
     const wheelState = corridorWheelStateRef.current
-    const maximumPosition = Math.max(
-      0,
-      spatialOrderIdsRef.current.length - CARD_SLOTS.length,
+    const maximumPosition = getDiscoveryMaximumWindowStart(
+      spatialOrderIdsRef.current.length,
     )
     const previousRawPosition = wheelState.rawPosition
     wheelState.rawPosition = Math.max(
@@ -5142,7 +5115,7 @@ export function DiscoveryView({
           !suspended &&
           showResults &&
           !isSearching &&
-          spatialOrderIds.length > CARD_SLOTS.length
+          spatialOrderIds.length > 1
         }
         inert={!active}
         onPointerDownCapture={handleResultStagePointerDownCapture}

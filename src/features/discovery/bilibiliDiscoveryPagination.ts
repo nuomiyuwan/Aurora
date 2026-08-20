@@ -1,7 +1,7 @@
 import type { DiscoveryResult } from './discoveryData'
 
 export const BILIBILI_DISCOVERY_PAGE_SIZE = 12
-export const BILIBILI_DISCOVERY_PREFETCH_THRESHOLD = 3
+export const BILIBILI_DISCOVERY_PREFETCH_THRESHOLD = 7
 
 export interface DiscoveryBilibiliSearchRequest {
   query: string

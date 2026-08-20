@@ -118,11 +118,11 @@ test('连续 B站搜索只展示当前响应并保持准确的结果数量', asy
   ).toHaveCount(0)
 })
 
-test('接近首批结果末端前自动追加 B站下一页并显示已加载与总量', async ({
+test('B站全部类型每页八条时会在十六条边界提前追加第三页', async ({
   page,
 }) => {
   test.setTimeout(60_000)
-  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
   await page.goto('/')
   await page.locator('.sideDock button[aria-label="探索"]').click()
   await page.evaluate(() => {
@@ -144,8 +144,9 @@ test('接近首批结果末端前自动追加 B站下一页并显示已加载与
           limit?: number
         }) => {
           calls.push(page)
-          const results = Array.from({ length: limit }, (_, index) => {
-            const mediaId = `BV${String((page - 1) * limit + index + 1).padStart(10, '0')}`
+          const resultCount = Math.max(1, Math.floor(limit * 2 / 3))
+          const results = Array.from({ length: resultCount }, (_, index) => {
+            const mediaId = `BV${String((page - 1) * resultCount + index + 1).padStart(10, '0')}`
             return {
               source: 'bilibili' as const,
               kind: 'video' as const,
@@ -154,7 +155,7 @@ test('接近首批结果末端前自动追加 B站下一页并显示已加载与
               episodeId: null,
               url: `https://www.bilibili.com/video/${mediaId}`,
               canonicalUrl: `https://www.bilibili.com/video/${mediaId}`,
-              title: `${query} 第 ${(page - 1) * limit + index + 1} 条`,
+              title: `${query} 第 ${(page - 1) * resultCount + index + 1} 条`,
               description: '',
               coverUrl: null,
               thumbnailPath: null,
@@ -195,7 +196,7 @@ test('接近首批结果末端前自动追加 B站下一页并显示已加载与
       (window as typeof window & { __auroraBilibiliPages?: number[] })
         .__auroraBilibiliPages ?? [],
     ),
-  ).toEqual([1, 2])
+  ).toEqual([1, 2, 3])
 })
 
 test('追加页瞬时失败后停止自动请求，并可从原页手动重试', async ({

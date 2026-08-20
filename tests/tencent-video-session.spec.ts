@@ -520,6 +520,41 @@ test('normalizes Tencent-owned series and ordinary video results only', () => {
   expect(response.nextPage).toBe(2)
 })
 
+test('keeps current Tencent vfiles series covers for managed caching', () => {
+  const coverUrl =
+    'https://vfiles.gtimg.cn/wuji_dashboard/xy/starter/tencent-series.png'
+  const response = normalizeTencentSearchPayload(
+    {
+      data: {
+        areaBoxList: [{
+          itemList: [{
+            doc: { dataType: 2, id: 'mzc00200nc1cbum' },
+            videoInfo: {
+              title: '火影忍者疾风传',
+              imgUrl: coverUrl,
+              playSites: [{
+                enName: 'qq',
+                totalEpisode: 720,
+                episodeInfoList: [{
+                  id: 'z3171ldqt0c',
+                  url: 'https://v.qq.com/x/cover/mzc00200nc1cbum/z3171ldqt0c.html',
+                }],
+              }],
+            },
+          }],
+        }],
+        normalList: { totalNum: 1, itemList: [] },
+      },
+    },
+    { query: '热血', page: 1, limit: 12 },
+  )
+
+  expect(response.results[0]).toMatchObject({
+    mediaId: 'mzc00200nc1cbum',
+    coverUrl,
+  })
+})
+
 test('filters Tencent categories from reviewed type names and tags', () => {
   const makeItem = (id: string, typeName: string) => ({
     doc: { dataType: 2, id },
