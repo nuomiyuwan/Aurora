@@ -1,0 +1,71 @@
+:root {
+  color-scheme: dark;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #080a0e;
+  color: #dbe1e9;
+}
+
+html, body, #player {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #080a0e;
+  outline: none;
+}
+
+#status {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 32px;
+  background: #080a0e;
+  text-align: center;
+}
+
+#status[hidden], #retry[hidden] {
+  display: none;
+}
+
+#status[data-busy="true"]::before {
+  content: "";
+  width: 28px;
+  height: 28px;
+  border: 2px solid #39424f;
+  border-top-color: #c4d5eb;
+  border-radius: 50%;
+  animation: player-loading 0.8s linear infinite;
+}
+
+@keyframes player-loading {
+  to { transform: rotate(360deg); }
+}
+
+#message {
+  max-width: 620px;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+#retry {
+  padding: 8px 24px;
+  border: 1px solid #4a5464;
+  border-radius: 7px;
+  background: #1d2632;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}

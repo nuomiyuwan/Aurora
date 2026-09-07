@@ -1,4 +1,7 @@
-import type { FrameAnnotation } from '../../data/mediaLibraryTypes'
+import type {
+  FrameAnnotation,
+  ProjectTrimRange,
+} from '../../data/mediaLibraryTypes'
 import type { ModelAsset } from '../../data/modelLibraryTypes'
 import { getModelAssetFormatLabel } from '../../data/modelLibraryTypes'
 import {
@@ -20,6 +23,7 @@ export type LocalDiscoveryClip = {
   thumbnail: string
   duration: string
   durationSeconds: number | null
+  trimRange?: ProjectTrimRange | null
   resolution: string
   width: number | null
   height: number | null
@@ -209,7 +213,12 @@ export function createLocalDiscoveryResults({
     const project = projectsById.get(clip.projectId)
     if (!project || (project.kind ?? 'video') !== 'video') return []
 
-    const annotations = annotationsByAssetId.get(clip.assetId) ?? []
+    const visibleFrameIds = new Set(
+      clip.indexedFrames.map((frame) => frame.id),
+    )
+    const annotations = (annotationsByAssetId.get(clip.assetId) ?? []).filter(
+      (annotation) => visibleFrameIds.has(annotation.frameId),
+    )
     const annotationsByFrameId = new Map(
       annotations.map((annotation) => [annotation.frameId, annotation]),
     )
@@ -252,8 +261,16 @@ export function createLocalDiscoveryResults({
         return []
       }
       const timecode = formatFrameRingTimecode(frame.timeSeconds, fps)
+      const playbackStartSeconds = clip.trimRange?.inSeconds ?? 0
       const previewProgress = clip.durationSeconds && clip.durationSeconds > 0
-        ? Math.min(100, Math.max(0, frame.timeSeconds / clip.durationSeconds * 100))
+        ? Math.min(
+            100,
+            Math.max(
+              0,
+              (frame.timeSeconds - playbackStartSeconds) /
+                clip.durationSeconds * 100,
+            ),
+          )
         : 0
       return [{
         ...clipResult,

@@ -153,9 +153,31 @@ type AiVisualSearchService = {
   }): Promise<AiVisualSearchResponse>
   analyzeFrames(request: {
     candidates: AiVisualFrameCandidate[]
+    operationId?: string
     profileId?: string | null
     visionProfileId?: string | null
+    descriptionStyle?: 'search-index' | 'frame-note'
   }): Promise<AiVisualFrameAnalysisResponse>
+  cancelOperation(input: string | { operationId: string }): boolean
+  summarizeFrameSequence(request: {
+    frames: Array<{
+      frameId: string
+      timeSeconds: number
+      note: string
+      tags: string[]
+      imagePath?: string
+    }>
+    profileId?: string | null
+    visionProfileId?: string | null
+  }): Promise<{
+    note: string
+    tags: string[]
+    cameraMotion: {
+      type: string
+      label: string
+      confidence: number
+    } | null
+  }>
   testProfile(input: unknown): Promise<{
     vision: { ok: true; model: string }
     embedding: { ok: true; model: string; dimensions: number }
@@ -276,6 +298,26 @@ function createCompatibleProviderMock({
       ) {
         structuredRejected = true
         return jsonResponse({ error: { message: 'response_format unsupported' } }, 400)
+      }
+
+      const responseFormat = body.response_format as {
+        json_schema?: { name?: string }
+      } | undefined
+      if (
+        responseFormat?.json_schema?.name ===
+        'aurora_frame_sequence_summary'
+      ) {
+        return jsonResponse({
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                note: '人物由远景逐渐接近镜头',
+                tags: ['人物', '户外'],
+                cameraMotion: { type: 'push-in', confidence: 0.88 },
+              }),
+            },
+          }],
+        })
       }
 
       const imageCount = messages[0].content.filter(
@@ -660,6 +702,135 @@ test('关键帧分析只调用视觉服务并复用逐帧描述缓存', async ()
   const cacheText = readFileSync(service.cachePath, 'utf8')
   expect(cacheText).toContain('"imageFingerprint"')
   expect(cacheText).toContain('"timeSeconds":0')
+})
+
+test('帧环短备注使用独立缓存并要求 AI 输出完整的 20 字内短句', async () => {
+  const { userDataPath, candidates } = createHarness()
+  const provider = createCompatibleProviderMock()
+  const active: ActiveServices = {
+    vision: serviceProfile('vision'),
+    embedding: null,
+  }
+  const service = createAiVisualSearchService({
+    userDataPath,
+    credentialsStore: {
+      readActiveServicesForMainProcess: async () => active,
+      resolveServiceProfileInputForMainProcess: async (kind) => active[kind]!,
+    },
+    fetchImpl: provider.fetchImpl,
+  })
+
+  await service.analyzeFrames({ candidates })
+  const concise = await service.analyzeFrames({
+    candidates,
+    descriptionStyle: 'frame-note',
+  })
+  expect(concise.newlyAnalyzedFrameCount).toBe(3)
+  expect(provider.visionIndexCalls).toBe(2)
+
+  const visionCalls = provider.calls.filter((call) =>
+    call.url.endsWith('/chat/completions'),
+  )
+  expect(JSON.stringify(visionCalls.at(-1)?.body.messages)).toContain(
+    '不超过 20 个字符的完整中文短句',
+  )
+
+  const repeated = await service.analyzeFrames({
+    candidates,
+    descriptionStyle: 'frame-note',
+  })
+  expect(repeated.newlyAnalyzedFrameCount).toBe(0)
+  expect(provider.visionIndexCalls).toBe(2)
+})
+
+test('智能整理可以中止正在进行的画面理解请求', async () => {
+  const { userDataPath, candidates } = createHarness()
+  const active: ActiveServices = {
+    vision: serviceProfile('vision'),
+    embedding: null,
+  }
+  let notifyStarted = () => undefined
+  const started = new Promise<void>((resolve) => {
+    notifyStarted = resolve
+  })
+  const fetchImpl = async (_url: string | URL | Request, init?: RequestInit) => {
+    notifyStarted()
+    return new Promise<Response>((_resolve, reject) => {
+      const abort = () => {
+        const error = new Error('aborted')
+        error.name = 'AbortError'
+        reject(error)
+      }
+      if (init?.signal?.aborted) abort()
+      else init?.signal?.addEventListener('abort', abort, { once: true })
+    })
+  }
+  const service = createAiVisualSearchService({
+    userDataPath,
+    credentialsStore: {
+      readActiveServicesForMainProcess: async () => active,
+      resolveServiceProfileInputForMainProcess: async (kind) => active[kind]!,
+    },
+    fetchImpl,
+  })
+  const operationId = 'smart-organize-test'
+  const analysis = service.analyzeFrames({
+    operationId,
+    visionProfileId: active.vision!.id,
+    descriptionStyle: 'frame-note',
+    candidates,
+  })
+
+  await started
+  expect(service.cancelOperation(operationId)).toBe(true)
+  await expect(analysis).rejects.toMatchObject({
+    code: 'AI_SEARCH_CANCELLED',
+  })
+  expect(service.cancelOperation(operationId)).toBe(false)
+})
+
+test('项目备注优先汇总帧环文字并保守返回镜头运动', async () => {
+  const { userDataPath, candidates } = createHarness()
+  const provider = createCompatibleProviderMock()
+  const active: ActiveServices = {
+    vision: serviceProfile('vision'),
+    embedding: null,
+  }
+  const service = createAiVisualSearchService({
+    userDataPath,
+    credentialsStore: {
+      readActiveServicesForMainProcess: async () => active,
+      resolveServiceProfileInputForMainProcess: async (kind) => active[kind]!,
+    },
+    fetchImpl: provider.fetchImpl,
+  })
+
+  const summary = await service.summarizeFrameSequence({
+    visionProfileId: active.vision!.id,
+    frames: [
+      { frameId: 'frame-0', timeSeconds: 0, note: '人物位于远景', tags: ['人物'], imagePath: candidates[0].imagePath },
+      { frameId: 'frame-1', timeSeconds: 2, note: '人物进入中景', tags: ['人物'], imagePath: candidates[1].imagePath },
+      { frameId: 'frame-2', timeSeconds: 4, note: '人物接近镜头', tags: ['人物'], imagePath: candidates[2].imagePath },
+    ],
+  })
+
+  expect(summary).toEqual({
+    note: '人物由远景逐渐接近镜头',
+    tags: ['人物', '户外'],
+    cameraMotion: {
+      type: 'push-in',
+      label: '推镜头',
+      confidence: 0.88,
+    },
+  })
+  const summaryCall = provider.calls.find((call) =>
+    (call.body.response_format as { json_schema?: { name?: string } })
+      ?.json_schema?.name === 'aurora_frame_sequence_summary',
+  )
+  expect(JSON.stringify(summaryCall?.body.messages)).toContain(
+    '主体自身移动不能当作摄像机运动',
+  )
+  expect(JSON.stringify(summaryCall?.body.messages)).toContain('image_url')
 })
 
 test('关键帧分析缓存同时校验时间与实际图片内容', async () => {

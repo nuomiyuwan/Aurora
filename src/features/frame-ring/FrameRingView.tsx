@@ -20,6 +20,7 @@ import {
   Trash2,
   Upload,
   Undo2,
+  VideoOff,
   Volume2,
   VolumeX,
   X,
@@ -40,7 +41,10 @@ import type {
   PointerEvent as ReactPointerEvent,
 } from 'react'
 import type { Project } from '../../data/projects'
-import type { MediaIndexTask } from '../../data/mediaLibraryTypes'
+import type {
+  MediaIndexTask,
+  ProjectTrimRange,
+} from '../../data/mediaLibraryTypes'
 import { getMediaColorPreset } from '../../data/mediaColorPresets'
 import {
   readWheelDragSample,
@@ -152,6 +156,29 @@ export interface FrameRingClipExportRequest {
   addToProjectId?: string
 }
 
+export interface FrameRingQuickClipExportRequest {
+  sourcePath: string | null
+  sourceFilename: string
+  assetId?: string
+  inSeconds: number
+  outSeconds: number
+  directoryPath: string
+  filename: string
+  rangeKind: 'project-trim' | 'full-source'
+}
+
+export interface FrameRingTrimRangeSaveRequest {
+  inFrame: number
+  outFrame: number
+  inSeconds: number
+  outSeconds: number
+}
+
+export interface FrameRingTrimRangeSaveResult {
+  ok: boolean
+  message?: string
+}
+
 export interface FrameRingViewProps {
   active: boolean
   suspended: boolean
@@ -184,6 +211,18 @@ export interface FrameRingViewProps {
   onExportClip?: (
     request: FrameRingClipExportRequest,
   ) => FrameRingExportResult | Promise<FrameRingExportResult>
+  onQuickExportClip?: (
+    request: FrameRingQuickClipExportRequest,
+  ) => FrameRingExportResult | Promise<FrameRingExportResult>
+  savedTrimRange?: ProjectTrimRange | null
+  onSaveTrimRange?: (
+    request: FrameRingTrimRangeSaveRequest,
+  ) =>
+    | FrameRingTrimRangeSaveResult
+    | Promise<FrameRingTrimRangeSaveResult>
+  onResetTrimRange?: () =>
+    | FrameRingTrimRangeSaveResult
+    | Promise<FrameRingTrimRangeSaveResult>
   onRevealSource?: (sourcePath: string) => boolean | Promise<boolean>
   onDeleteFrame?: (frameId: string) => boolean | Promise<boolean>
   onScanSmartFrames?: (
@@ -192,6 +231,7 @@ export interface FrameRingViewProps {
   onAnalyzeSmartFrames?: (
     frameIds: readonly string[],
   ) => FrameRingAnnotationSuggestion[] | Promise<FrameRingAnnotationSuggestion[]>
+  onCancelSmartOrganize?: () => void | Promise<void>
   onApplySmartOrganize?: (
     request: FrameRingSmartApplyRequest,
   ) => FrameRingSmartApplyResult | Promise<FrameRingSmartApplyResult>
@@ -199,6 +239,7 @@ export interface FrameRingViewProps {
   indexTask?: MediaIndexTask
   indexProgress?: number
   onBuildFrameRing?: () => boolean | Promise<boolean>
+  sourceOffline?: boolean
   previewTask?: FrameRingPreviewTask
   previewProgress?: number
   previewError?: string | null
@@ -215,6 +256,7 @@ export interface FrameRingViewProps {
 const FRAME_SETTLE_DURATION = 440
 const VIDEO_DECODE_WATCHDOG_DELAY = 1_400
 const DEFAULT_TRIM_DURATION_SECONDS = 2
+const TRIM_THUMBNAIL_TARGET_WIDTH = 64
 const FRAME_NOTE_MAX_LENGTH = 20
 const TAG_CAPACITY_STATUS = '标签已满，请先移除一个标签'
 const TRIM_ADJUSTMENT_KEYS = new Set([
@@ -228,6 +270,21 @@ const TRIM_ADJUSTMENT_KEYS = new Set([
   'PageUp',
 ])
 
+const resolveTimelineThumbnailTileFrames = (
+  viewportFrames: number,
+  timelineWidth: number,
+) => {
+  const targetTileCount = Math.max(
+    1,
+    Math.ceil(Math.max(1, timelineWidth) / TRIM_THUMBNAIL_TARGET_WIDTH),
+  )
+  const rawTileFrames = Math.max(1, viewportFrames / targetTileCount)
+  return Math.max(1, 2 ** Math.round(Math.log2(rawTileFrames)))
+}
+
+const getTimelineThumbnailTimeKey = (timeSeconds: number) =>
+  String(Math.round(timeSeconds * 1_000_000))
+
 const getExportResolutionLabel = (resolution: string) =>
   resolution.includes('3840') ? `${resolution} (4K UHD)` : resolution
 
@@ -236,6 +293,9 @@ const getExportFpsLabel = (fps: string) =>
 
 const getStillExportDirectory = (projectTitle: string) =>
   `${projectTitle.trim() || 'Aurora Project'}/Exports/Stills`
+
+const getQuickClipExportDirectory = (projectTitle: string) =>
+  `${projectTitle.trim() || 'Aurora Project'}/Exports/Video`
 
 const sanitizeStillExportFilename = (value: string) => Array.from(value.trim())
   .filter((character) => character.charCodeAt(0) >= 32)
@@ -263,6 +323,33 @@ const normalizeStillExportFilename = (value: string, fallback: string) => {
   const fallbackStem = fallback.replace(/\.png$/i, '')
   const filenameStem = sanitized.replace(/\.[a-z0-9]{2,5}$/i, '') || fallbackStem
   return `${filenameStem}.png`
+}
+
+const getSourceVideoExtension = (sourceFilename: string) =>
+  sourceFilename.match(/\.([a-z0-9]{2,8})$/i)?.[1].toLowerCase() || 'mov'
+
+const getDefaultQuickClipExportFilename = (
+  sourceFilename: string,
+  inTimecode: string,
+  outTimecode: string,
+) => {
+  const sourceStem = sourceFilename.replace(/\.[^./\\]+$/, '') || 'Aurora_Clip'
+  const safeSourceStem = sanitizeStillExportFilename(sourceStem) || 'Aurora_Clip'
+  const safeInTimecode = inTimecode.replace(/[:;]/g, '-')
+  const safeOutTimecode = outTimecode.replace(/[:;]/g, '-')
+  const extension = getSourceVideoExtension(sourceFilename)
+  return `${safeSourceStem}_QUICK_TC_${safeInTimecode}_${safeOutTimecode}.${extension}`
+}
+
+const normalizeQuickClipExportFilename = (
+  value: string,
+  fallback: string,
+  extension: string,
+) => {
+  const sanitized = sanitizeStillExportFilename(value) || fallback
+  const fallbackStem = fallback.replace(/\.[a-z0-9]{2,8}$/i, '')
+  const filenameStem = sanitized.replace(/\.[a-z0-9]{2,8}$/i, '') || fallbackStem
+  return `${filenameStem}.${extension}`
 }
 
 const getDefaultClipExportFilename = (
@@ -299,6 +386,14 @@ type VideoWithDecodeMetrics = HTMLVideoElement & {
     totalVideoFrames?: number
   }
   webkitDecodedFrameCount?: number
+}
+
+interface TimelineTrimThumbnailSet {
+  sourceKey: string
+  samples: Record<string, {
+    thumbnail: string
+    timeSeconds: number
+  }>
 }
 
 const readDecodedVideoFrameCount = (video: VideoWithDecodeMetrics) => {
@@ -350,6 +445,8 @@ interface StillExportTarget {
   sourceFilename: string
 }
 
+type QuickExportKind = 'still' | 'video'
+
 interface StillExportDirectoryPickerOptions {
   id: string
   mode: 'readwrite'
@@ -382,15 +479,21 @@ export function FrameRingView({
   onChooseExportDirectory,
   onExportStill,
   onExportClip,
+  onQuickExportClip,
+  savedTrimRange = null,
+  onSaveTrimRange,
+  onResetTrimRange,
   onRevealSource,
   onDeleteFrame,
   onScanSmartFrames,
   onAnalyzeSmartFrames,
+  onCancelSmartOrganize,
   onApplySmartOrganize,
   onUndoSmartOrganize,
   indexTask = 'idle',
   indexProgress,
   onBuildFrameRing,
+  sourceOffline = false,
   previewTask = 'ready',
   previewProgress,
   previewError,
@@ -416,14 +519,18 @@ export function FrameRingView({
     [clip, relatedThumbnails],
   )
   const hasFrameRing = frames.length > 0
+  const hasUnindexedLocalActions =
+    !hasFrameRing &&
+    !onlinePlaybackMode &&
+    !externalPreview &&
+    !sourceOffline &&
+    Boolean(clip.sourcePath)
+  const hasLocalTimelineThumbnailSource =
+    !onlinePlaybackMode &&
+    !externalPreview &&
+    Boolean(clip.sourcePath)
+  const hasLocalBottomActions = hasFrameRing || hasUnindexedLocalActions
   const mediaColorFilter = getMediaColorPreset(clip.colorPreset).cssFilter
-  const frameRingCssVariables = useMemo(
-    () => ({
-      ...getFrameRingCssVariables(layout, { hasFrameRing }),
-      '--media-color-filter': mediaColorFilter,
-    }) as CSSProperties,
-    [hasFrameRing, layout, mediaColorFilter],
-  )
   const getRequestedFrameIndex = useCallback(() => {
     if (frames.length === 0) return 0
     if (focusTarget?.frameId) {
@@ -456,7 +563,10 @@ export function FrameRingView({
   const [onlineReflectionReadySourceId, setOnlineReflectionReadySourceId] =
     useState('')
   const [playerTimeSeconds, setPlayerTimeSeconds] = useState(
-    frames[initialIndex]?.timeSeconds ?? 0,
+    frames[initialIndex]?.timeSeconds ??
+      focusTarget?.timeSeconds ??
+      savedTrimRange?.inSeconds ??
+      0,
   )
   const mediaDurationSourceKey = `${clip.id}\u0000${clip.sourceUrl ?? ''}`
   const [mediaDurationSample, setMediaDurationSample] = useState<{
@@ -483,12 +593,29 @@ export function FrameRingView({
   const [annotationEditing, setAnnotationEditing] = useState(false)
   const [frameQuery, setFrameQuery] = useState('')
   const [trimMode, setTrimMode] = useState(false)
+  const infoPanelVisible = hasFrameRing || trimMode
+  const frameRingCssVariables = useMemo(
+    () => ({
+      ...getFrameRingCssVariables(layout, {
+        hasFrameRing,
+        alignInfoToUnindexedTrim: !hasFrameRing && trimMode,
+      }),
+      '--media-color-filter': mediaColorFilter,
+    }) as CSSProperties,
+    [hasFrameRing, layout, mediaColorFilter, trimMode],
+  )
   const [clipInFrame, setClipInFrame] = useState(0)
   const [clipOutFrame, setClipOutFrame] = useState(1)
   const [trimViewport, setTrimViewport] = useState<TrimViewport>({
     startFrame: 0,
     endFrame: 1,
   })
+  const trimFilmstripRef = useRef<HTMLDivElement>(null)
+  const [trimFilmstripWidth, setTrimFilmstripWidth] = useState(0)
+  const [timelineTrimThumbnails, setTimelineTrimThumbnails] =
+    useState<TimelineTrimThumbnailSet | null>(null)
+  const timelineTrimThumbnailsRef = useRef<TimelineTrimThumbnailSet | null>(null)
+  const trimThumbnailRequestRevisionRef = useRef(0)
   const [trimHandleAdjusting, setTrimHandleAdjusting] = useState(false)
   const [activeTrimHandle, setActiveTrimHandle] = useState<TrimHandle | null>(null)
   const [exportFormat, setExportFormat] = useState('Apple ProRes 422 HQ')
@@ -499,6 +626,8 @@ export function FrameRingView({
   const [addExportToCurrentProject, setAddExportToCurrentProject] =
     useState(false)
   const [stillExportDialogOpen, setStillExportDialogOpen] = useState(false)
+  const [quickExportKind, setQuickExportKind] =
+    useState<QuickExportKind>('still')
   const [smartOrganizeDialogOpen, setSmartOrganizeDialogOpen] = useState(false)
   const [smartOrganizeSensitivity, setSmartOrganizeSensitivity] =
     useState<FrameRingSmartSensitivity>('conservative')
@@ -523,6 +652,7 @@ export function FrameRingView({
   const [smartOrganizeResult, setSmartOrganizeResult] =
     useState<FrameRingSmartApplyResult | null>(null)
   const [smartOrganizeError, setSmartOrganizeError] = useState('')
+  const smartOrganizeRunRevisionRef = useRef(0)
   const [stillExportDirectory, setStillExportDirectory] = useState('')
   const [stillExportFilename, setStillExportFilename] = useState('')
   const editableTagsRef = useRef<HTMLDivElement>(null)
@@ -532,6 +662,7 @@ export function FrameRingView({
   const [stillExportDirectoryPickerStatus, setStillExportDirectoryPickerStatus] = useState('')
   const [stillExportDirectoryPicking, setStillExportDirectoryPicking] = useState(false)
   const [exportPending, setExportPending] = useState(false)
+  const [trimRangePending, setTrimRangePending] = useState(false)
   const [videoPlaybackFailed, setVideoPlaybackFailed] = useState(false)
   const [pendingDeleteFrameId, setPendingDeleteFrameId] = useState<
     string | null
@@ -539,13 +670,15 @@ export function FrameRingView({
   const [buildFrameRingPending, setBuildFrameRingPending] = useState(false)
   const interactive = active && !suspended
   const knownCompatibilityPreviewRequired =
+    !sourceOffline &&
     clip.sampleCount <= 0 &&
     requiresKnownVideoPreviewProxy(clip.codec) &&
     !previewUsesProxy
-  const hasPlayableVideo = canPlayFrameRingVideoSource(
-    clip.sourceUrl,
-    videoPlaybackFailed,
-  ) && !knownCompatibilityPreviewRequired
+  const hasPlayableVideo = !sourceOffline &&
+    canPlayFrameRingVideoSource(
+      clip.sourceUrl,
+      videoPlaybackFailed,
+    ) && !knownCompatibilityPreviewRequired
   const frameDragSpacing = layout.dragSpacing
   const suppressClick = useRef(false)
   const settleTimer = useRef<number | undefined>(undefined)
@@ -665,6 +798,7 @@ export function FrameRingView({
 
   const requestCompatibleVideoPreview = useCallback(() => {
     if (
+      sourceOffline ||
       previewUsesProxy ||
       previewFallbackRequestedRef.current ||
       !onPreviewPlaybackError
@@ -692,7 +826,12 @@ export function FrameRingView({
         setActionStatus('视频预览准备失败，请检查素材文件后重试')
       })
     return true
-  }, [clearVideoDecodeWatchdog, onPreviewPlaybackError, previewUsesProxy])
+  }, [
+    clearVideoDecodeWatchdog,
+    onPreviewPlaybackError,
+    previewUsesProxy,
+    sourceOffline,
+  ])
 
   const armVideoDecodeWatchdog = useCallback((source: HTMLVideoElement) => {
     clearVideoDecodeWatchdog()
@@ -784,27 +923,43 @@ export function FrameRingView({
     requestCompatibleVideoPreview,
   ])
 
+  const emptyPreviewTimeSeconds = savedTrimRange?.inSeconds ?? 0
+  const emptyPreviewTimecode = formatFrameRingTimecode(
+    emptyPreviewTimeSeconds,
+    clip.fpsValue ?? parseFrameRingFps(clip.fps),
+  )
   const emptyPreviewFrame = useMemo<FrameRingFrame>(() => ({
     id: `${clip.assetId ?? clip.id}:preview`,
     index: 0,
     thumbnail: clip.thumbnail,
-    timeSeconds: 0,
-    timecode: '00:00:00:00',
-    shortTimecode: '00:00',
+    timeSeconds: emptyPreviewTimeSeconds,
+    timecode: emptyPreviewTimecode,
+    shortTimecode: emptyPreviewTimecode.slice(3, 8),
     cropX: 50,
     cropY: 50,
     brightness: 1,
-  }), [clip.assetId, clip.id, clip.thumbnail])
+  }), [
+    clip.assetId,
+    clip.id,
+    clip.thumbnail,
+    emptyPreviewTimeSeconds,
+    emptyPreviewTimecode,
+  ])
   const settledFrame = frames[settledIndex] ?? frames[0] ?? emptyPreviewFrame
   const mediaDurationSeconds = resolveFrameRingMediaDurationForSource(
     mediaDurationSample,
     mediaDurationSourceKey,
   )
-  const durationSeconds = resolveFrameRingPlaybackDurationSeconds(
-    clip.durationSeconds,
-    clip.duration,
-    mediaDurationSeconds,
-  )
+  const durationSeconds =
+    typeof clip.sourceDurationSeconds === 'number' &&
+    Number.isFinite(clip.sourceDurationSeconds) &&
+    clip.sourceDurationSeconds > 0
+      ? clip.sourceDurationSeconds
+      : resolveFrameRingPlaybackDurationSeconds(
+          clip.durationSeconds,
+          clip.duration,
+          mediaDurationSeconds,
+        )
   const playerFps =
     clip.fpsValue !== null &&
     clip.fpsValue !== undefined &&
@@ -818,15 +973,60 @@ export function FrameRingView({
   )
   const playerFrame = frames[playerFrameIndex] ?? settledFrame
   const playerTimecode = formatFrameRingTimecode(playerTimeSeconds, playerFps)
-  const durationTimecode = formatFrameRingTimecode(durationSeconds, playerFps)
   const totalTrimFrames = Math.max(1, Math.round(durationSeconds * playerFps))
   const clipInSeconds = Math.min(durationSeconds, clipInFrame / playerFps)
   const clipOutSeconds = Math.min(durationSeconds, clipOutFrame / playerFps)
-  const playbackStartSeconds = trimMode ? clipInSeconds : 0
-  const playbackEndSeconds = trimMode ? clipOutSeconds : durationSeconds
+  const minimumPlaybackDuration = 1 / playerFps
+  const projectPlaybackStartSeconds = savedTrimRange
+    ? Math.min(
+        Math.max(0, durationSeconds - minimumPlaybackDuration),
+        Math.max(0, savedTrimRange.inSeconds),
+      )
+    : 0
+  const projectPlaybackEndSeconds = savedTrimRange
+    ? Math.min(
+        durationSeconds,
+        Math.max(
+          projectPlaybackStartSeconds + minimumPlaybackDuration,
+          Math.min(durationSeconds, savedTrimRange.outSeconds),
+        ),
+      )
+    : durationSeconds
+  const quickClipInSeconds = savedTrimRange ? projectPlaybackStartSeconds : 0
+  const quickClipOutSeconds = savedTrimRange
+    ? projectPlaybackEndSeconds
+    : durationSeconds
+  const quickClipInTimecode = formatFrameRingTimecode(
+    quickClipInSeconds,
+    playerFps,
+  )
+  const quickClipOutTimecode = formatFrameRingTimecode(
+    quickClipOutSeconds,
+    playerFps,
+  )
+  const quickClipDurationTimecode = formatFrameRingTimecode(
+    Math.max(minimumPlaybackDuration, quickClipOutSeconds - quickClipInSeconds),
+    playerFps,
+  )
+  const quickClipExtension = getSourceVideoExtension(clip.filename)
+  const quickClipDefaultFilename = getDefaultQuickClipExportFilename(
+    clip.filename,
+    quickClipInTimecode,
+    quickClipOutTimecode,
+  )
+  const playbackStartSeconds = trimMode
+    ? clipInSeconds
+    : projectPlaybackStartSeconds
+  const playbackEndSeconds = trimMode
+    ? clipOutSeconds
+    : projectPlaybackEndSeconds
   const playbackDurationSeconds = Math.max(
-    1 / playerFps,
+    minimumPlaybackDuration,
     playbackEndSeconds - playbackStartSeconds,
+  )
+  const durationTimecode = formatFrameRingTimecode(
+    playbackDurationSeconds,
+    playerFps,
   )
   const playerProgress = Math.min(
     100,
@@ -859,6 +1059,199 @@ export function FrameRingView({
     1,
     clipSelectionFrames / trimViewportFrames,
   )
+  const timelineThumbnailSourceKey = JSON.stringify([
+    clip.id,
+    clip.assetId,
+    clip.sourcePath,
+  ])
+  const timelineThumbnailTileFrames = resolveTimelineThumbnailTileFrames(
+    trimViewportFrames,
+    trimFilmstripWidth,
+  )
+  const timelineThumbnailFirstTileFrame = Math.floor(
+    trimViewport.startFrame / timelineThumbnailTileFrames,
+  ) * timelineThumbnailTileFrames
+  const timelineThumbnailLastTileFrame = Math.floor(
+    Math.max(trimViewport.startFrame, trimViewport.endFrame - 1) /
+      timelineThumbnailTileFrames,
+  ) * timelineThumbnailTileFrames
+  const timelineThumbnailRequestKey = JSON.stringify([
+    timelineThumbnailSourceKey,
+    timelineThumbnailTileFrames,
+    timelineThumbnailFirstTileFrame,
+    timelineThumbnailLastTileFrame,
+    playerFps,
+  ])
+  const timelineThumbnailRequests = useMemo(() => {
+    const requests: Array<{
+      key: string
+      startFrame: number
+      endFrame: number
+      sampleFrame: number
+      timeSeconds: number
+    }> = []
+    for (
+      let startFrame = timelineThumbnailFirstTileFrame;
+      startFrame <= timelineThumbnailLastTileFrame;
+      startFrame += timelineThumbnailTileFrames
+    ) {
+      const endFrame = Math.min(
+        totalTrimFrames,
+        startFrame + timelineThumbnailTileFrames,
+      )
+      const sampleFrame = Math.min(
+        totalTrimFrames - 1,
+        Math.floor((startFrame + endFrame) / 2),
+      )
+      const timeSeconds = sampleFrame / playerFps
+      requests.push({
+        key: getTimelineThumbnailTimeKey(timeSeconds),
+        startFrame,
+        endFrame,
+        sampleFrame,
+        timeSeconds,
+      })
+    }
+    return requests
+  }, [
+    playerFps,
+    timelineThumbnailFirstTileFrame,
+    timelineThumbnailLastTileFrame,
+    timelineThumbnailTileFrames,
+    totalTrimFrames,
+  ])
+  const timelineThumbnailTiles = useMemo(() =>
+    timelineThumbnailRequests.map((request) => ({
+      ...request,
+      leftPercent:
+        ((request.startFrame - trimViewport.startFrame) / trimViewportFrames) * 100,
+      widthPercent:
+        ((request.endFrame - request.startFrame) / trimViewportFrames) * 100,
+    })), [
+    timelineThumbnailRequests,
+    trimViewport.startFrame,
+    trimViewportFrames,
+  ])
+
+  useLayoutEffect(() => {
+    if (!trimMode) return
+    const filmstrip = trimFilmstripRef.current
+    if (!filmstrip) return
+    const updateWidth = () => {
+      const nextWidth = filmstrip.getBoundingClientRect().width
+      if (!Number.isFinite(nextWidth) || nextWidth <= 0) return
+      setTrimFilmstripWidth((current) =>
+        Math.abs(current - nextWidth) < 0.5 ? current : nextWidth,
+      )
+    }
+    updateWidth()
+    const observer = new ResizeObserver(updateWidth)
+    observer.observe(filmstrip)
+    return () => observer.disconnect()
+  }, [layout.signature, trimMode])
+
+  useEffect(() => {
+    if (
+      timelineTrimThumbnailsRef.current?.sourceKey ===
+      timelineThumbnailSourceKey
+    ) return
+    const next = {
+      sourceKey: timelineThumbnailSourceKey,
+      samples: {},
+    }
+    timelineTrimThumbnailsRef.current = next
+    setTimelineTrimThumbnails(next)
+  }, [timelineThumbnailSourceKey])
+
+  useEffect(() => {
+    const bridge = window.desktopBridge
+    const assetId = clip.assetId
+    const sourcePath = clip.sourcePath
+    if (
+      !active ||
+      suspended ||
+      !trimMode ||
+      !hasLocalTimelineThumbnailSource ||
+      sourceOffline ||
+      trimFilmstripWidth <= 0 ||
+      !assetId ||
+      !sourcePath ||
+      !bridge?.ensureTimelineThumbnail
+    ) {
+      return
+    }
+
+    const requestRevision = trimThumbnailRequestRevisionRef.current + 1
+    trimThumbnailRequestRevisionRef.current = requestRevision
+    const operationIds = new Set<string>()
+    let cancelled = false
+    const existingSamples =
+      timelineTrimThumbnailsRef.current?.sourceKey ===
+      timelineThumbnailSourceKey
+        ? timelineTrimThumbnailsRef.current.samples
+        : {}
+
+    timelineThumbnailRequests
+      .filter((request) => !existingSamples[request.key])
+      .forEach((request) => {
+        const operationId = bridge.createMediaOperationId()
+        operationIds.add(operationId)
+        void bridge.ensureTimelineThumbnail({
+          assetId,
+          sourcePath,
+          timeSeconds: request.timeSeconds,
+          operationId,
+        }).then((result) => {
+          if (
+            cancelled ||
+            trimThumbnailRequestRevisionRef.current !== requestRevision ||
+            result.assetId !== assetId
+          ) return
+          const thumbnail = bridge.getMediaUrl(result.thumbnailPath)
+          if (!thumbnail) return
+          setTimelineTrimThumbnails((current) => {
+            if (current?.sourceKey !== timelineThumbnailSourceKey) return current
+            const next = {
+              ...current,
+              samples: {
+                ...current.samples,
+                [request.key]: {
+                  thumbnail,
+                  timeSeconds: result.timeSeconds,
+                },
+              },
+            }
+            timelineTrimThumbnailsRef.current = next
+            return next
+          })
+        }).catch(() => undefined).finally(() => {
+          operationIds.delete(operationId)
+        })
+      })
+
+    return () => {
+      cancelled = true
+      if (trimThumbnailRequestRevisionRef.current === requestRevision) {
+        trimThumbnailRequestRevisionRef.current += 1
+      }
+      for (const operationId of operationIds) {
+        void bridge.cancelMediaOperation(operationId).catch(() => undefined)
+      }
+    }
+  }, [
+    active,
+    clip.assetId,
+    clip.sourcePath,
+    hasLocalTimelineThumbnailSource,
+    playerFps,
+    sourceOffline,
+    suspended,
+    trimFilmstripWidth,
+    timelineThumbnailRequestKey,
+    timelineThumbnailRequests,
+    timelineThumbnailSourceKey,
+    trimMode,
+  ])
   const defaultAnnotation = useMemo<FrameAnnotation>(() => ({
     favorite: false,
     rating: 0,
@@ -930,11 +1323,36 @@ export function FrameRingView({
     visibleFrames.map((frame) => frame.id).join(','),
   ].join('|')
   const trimTimelineFrames = useMemo(() => {
+    if (hasLocalTimelineThumbnailSource) {
+      const timelineSet = timelineTrimThumbnails?.sourceKey ===
+          timelineThumbnailSourceKey
+        ? timelineTrimThumbnails
+        : null
+      return timelineThumbnailTiles.map((tile) => {
+        const sample = timelineSet?.samples[tile.key]
+        return {
+          frame: sample
+            ? {
+                ...emptyPreviewFrame,
+                id: `${emptyPreviewFrame.id}:trim:${tile.sampleFrame}`,
+                thumbnail: sample.thumbnail,
+                timeSeconds: sample.timeSeconds,
+                timecode: formatFrameRingTimecode(sample.timeSeconds, playerFps),
+              }
+            : emptyPreviewFrame,
+          key: `${timelineThumbnailSourceKey}:${timelineThumbnailTileFrames}:${tile.startFrame}`,
+          leftPercent: tile.leftPercent,
+          widthPercent: tile.widthPercent,
+        }
+      })
+    }
     const previewCount = Math.min(9, frames.length)
     if (previewCount <= 1) {
       return frames.slice(0, 1).map((frame, index) => ({
         frame,
         key: `${frame.id}:trim:${index}`,
+        leftPercent: 0,
+        widthPercent: 100,
       }))
     }
     return Array.from({ length: previewCount }, (_, index) => {
@@ -945,9 +1363,26 @@ export function FrameRingView({
       const frameProgress = sampleFrame / totalTrimFrames
       const frameIndex = Math.round(frameProgress * (frames.length - 1))
       const frame = frames[Math.min(frames.length - 1, Math.max(0, frameIndex))]
-      return frame ? { frame, key: `${frame.id}:trim:${index}` } : null
+      return frame ? {
+        frame,
+        key: `${frame.id}:trim:${index}`,
+        leftPercent: (index / previewCount) * 100,
+        widthPercent: 100 / previewCount,
+      } : null
     }).filter((item): item is NonNullable<typeof item> => Boolean(item))
-  }, [frames, totalTrimFrames, trimViewport.startFrame, trimViewportFrames])
+  }, [
+    emptyPreviewFrame,
+    frames,
+    hasLocalTimelineThumbnailSource,
+    playerFps,
+    timelineThumbnailSourceKey,
+    timelineThumbnailTileFrames,
+    timelineThumbnailTiles,
+    timelineTrimThumbnails,
+    totalTrimFrames,
+    trimViewport.startFrame,
+    trimViewportFrames,
+  ])
   const trimRulerTicks = useMemo(() => {
     const rawStepFrames = Math.max(1, trimViewportFrames / 80)
     const magnitude = 10 ** Math.floor(Math.log10(rawStepFrames))
@@ -993,6 +1428,11 @@ export function FrameRingView({
   ]))
 
   const togglePlayerPlayback = useCallback(() => {
+    if (sourceOffline) {
+      setIsPlayerPlaying(false)
+      setActionStatus('素材已离线，重新连接原文件后可恢复播放')
+      return
+    }
     if (knownCompatibilityPreviewRequired) {
       requestCompatibleVideoPreview()
       return
@@ -1048,6 +1488,7 @@ export function FrameRingView({
     playerFps,
     playerTimeSeconds,
     requestCompatibleVideoPreview,
+    sourceOffline,
   ])
 
   const seekPlayer = useCallback((nextTime: number, pausePlayback = true) => {
@@ -1105,7 +1546,8 @@ export function FrameRingView({
       setIsPlayerPlaying(false)
 
       settleTimer.current = window.setTimeout(() => {
-        const nextTime = frames[clampedIndex]?.timeSeconds ?? 0
+        const nextTime =
+          frames[clampedIndex]?.timeSeconds ?? savedTrimRange?.inSeconds ?? 0
         setSettledIndex(clampedIndex)
         setPlayerTimeSeconds(nextTime)
         requestPreviewReflectionSnapshot(nextTime)
@@ -1114,7 +1556,7 @@ export function FrameRingView({
         settleTimer.current = undefined
       }, duration)
     },
-    [frames, requestPreviewReflectionSnapshot],
+    [frames, requestPreviewReflectionSnapshot, savedTrimRange?.inSeconds],
   )
 
   useEffect(() => {
@@ -1133,7 +1575,15 @@ export function FrameRingView({
     setBoundary(null)
     setIsPlayerPlaying(false)
     setWindowControlsVisible(false)
-    const nextInitialTime = frames[nextInitialIndex]?.timeSeconds ?? 0
+    const requestedInitialTime =
+      frames[nextInitialIndex]?.timeSeconds ??
+      focusTarget?.timeSeconds ??
+      savedTrimRange?.inSeconds ??
+      0
+    const nextInitialTime = Math.min(
+      projectPlaybackEndSeconds,
+      Math.max(projectPlaybackStartSeconds, requestedInitialTime),
+    )
     setPlayerTimeSeconds(nextInitialTime)
     requestPreviewReflectionSnapshot(nextInitialTime)
     setTagDraft('')
@@ -1155,6 +1605,7 @@ export function FrameRingView({
     setExportFps(getExportFpsLabel(clip.fps))
     setAddExportToCurrentProject(false)
     setStillExportDialogOpen(false)
+    setQuickExportKind('still')
     setStillExportDirectory('')
     setStillExportFilename('')
     setStillExportTarget(null)
@@ -1162,6 +1613,7 @@ export function FrameRingView({
     setStillExportDirectoryPickerStatus('')
     setStillExportDirectoryPicking(false)
     setExportPending(false)
+    setTrimRangePending(false)
     setPendingDeleteFrameId(null)
     setBuildFrameRingPending(false)
     stillExportDirectoryPickingRef.current = false
@@ -1172,15 +1624,22 @@ export function FrameRingView({
     clip.fpsValue,
     clip.id,
     clip.resolution,
+    clip.sourceDurationSeconds,
     clip.sourceUrl,
     frames,
     focusTarget?.requestId,
+    focusTarget?.timeSeconds,
     getRequestedFrameIndex,
+    projectPlaybackEndSeconds,
+    projectPlaybackStartSeconds,
     requestPreviewReflectionSnapshot,
+    savedTrimRange?.inSeconds,
     totalTrimFrames,
   ])
 
   useEffect(() => {
+    smartOrganizeRunRevisionRef.current += 1
+    void onCancelSmartOrganize?.()
     setSmartOrganizeDialogOpen(false)
     setSmartOrganizeStage('ready')
     setSmartOrganizeScan(null)
@@ -2095,14 +2554,18 @@ export function FrameRingView({
   }
 
   function openSmartOrganizeDialog() {
+    smartOrganizeRunRevisionRef.current += 1
     resetSmartOrganize()
     setIsPlayerPlaying(false)
     setSmartOrganizeDialogOpen(true)
   }
 
   function closeSmartOrganizeDialog() {
-    if (isSmartOrganizeBusy()) return
+    const wasBusy = isSmartOrganizeBusy()
+    smartOrganizeRunRevisionRef.current += 1
+    if (wasBusy) void onCancelSmartOrganize?.()
     setSmartOrganizeDialogOpen(false)
+    if (wasBusy) resetSmartOrganize()
   }
 
   function frameHasProtectedAnnotation(frameId: string) {
@@ -2123,12 +2586,14 @@ export function FrameRingView({
       setSmartOrganizeError('当前环境暂不支持帧质量检测')
       return
     }
+    const runRevision = ++smartOrganizeRunRevisionRef.current
     setSmartOrganizeStage('scanning')
     setSmartOrganizeError('')
     setSmartOrganizeSuggestions([])
     setSmartOrganizeResult(null)
     try {
       const scan = await onScanSmartFrames(smartOrganizeSensitivity)
+      if (runRevision !== smartOrganizeRunRevisionRef.current) return
       const candidateFrameIds = getFrameRingSmartExcludedFrameIds(scan)
       setSmartOrganizeScan(scan)
       setSmartOrganizeSelectedFrameIds(
@@ -2140,6 +2605,7 @@ export function FrameRingView({
       )
       setSmartOrganizeStage('review')
     } catch (error) {
+      if (runRevision !== smartOrganizeRunRevisionRef.current) return
       setSmartOrganizeError(
         error instanceof Error && error.message
           ? error.message
@@ -2201,18 +2667,21 @@ export function FrameRingView({
       setSmartOrganizeError('当前环境暂不支持应用整理结果')
       return
     }
+    const runRevision = ++smartOrganizeRunRevisionRef.current
     setSmartOrganizeStage('applying')
     setSmartOrganizeError('')
     try {
       const result = await onApplySmartOrganize(
         createSmartOrganizeApplyRequest(suggestions),
       )
+      if (runRevision !== smartOrganizeRunRevisionRef.current) return
       setSmartOrganizeResult(result)
       setSmartOrganizeStage('complete')
       setActionStatus(
         `智能整理完成：移除 ${result.excludedCount} 帧，更新 ${result.annotatedCount} 帧标注`,
       )
     } catch (error) {
+      if (runRevision !== smartOrganizeRunRevisionRef.current) return
       setSmartOrganizeError(
         error instanceof Error && error.message
           ? error.message
@@ -2236,13 +2705,16 @@ export function FrameRingView({
     const retainedFrameIds = frames
       .filter((frame) => !smartOrganizeSelectedFrameIds.has(frame.id))
       .map((frame) => frame.id)
+    const runRevision = ++smartOrganizeRunRevisionRef.current
     setSmartOrganizeStage('analyzing')
     setSmartOrganizeError('')
     try {
       const suggestions = await onAnalyzeSmartFrames(retainedFrameIds)
+      if (runRevision !== smartOrganizeRunRevisionRef.current) return
       setSmartOrganizeSuggestions(suggestions)
       setSmartOrganizeStage('preview')
     } catch (error) {
+      if (runRevision !== smartOrganizeRunRevisionRef.current) return
       setSmartOrganizeError(
         error instanceof Error && error.message
           ? error.message
@@ -2267,27 +2739,36 @@ export function FrameRingView({
     }
   }
 
-  const openTrimWorkspace = useCallback(() => {
-    const nextInFrame = Math.min(
+  const openTrimWorkspace = useCallback((entryTimeSeconds?: number, endTimeSeconds?: number) => {
+    if (isDragging || isSettling) return
+    const requestedTimeSeconds = entryTimeSeconds ??
+      (hasFrameRing
+        ? settledFrame.timeSeconds
+        : previewVideoRef.current?.currentTime ?? playerTimeSeconds)
+    const requestedInFrame = Math.min(
       Math.max(0, totalTrimFrames - 1),
-      Math.max(0, Math.round(settledFrame.timeSeconds * playerFps)),
+      Math.max(0, Math.round(requestedTimeSeconds * playerFps)),
     )
     const defaultDurationFrames = Math.max(
       1,
       Math.round(DEFAULT_TRIM_DURATION_SECONDS * playerFps),
     )
+    const nextInFrame = requestedInFrame
     const nextOutFrame = Math.min(
       totalTrimFrames,
-      nextInFrame + defaultDurationFrames,
+      endTimeSeconds === undefined
+        ? nextInFrame + defaultDurationFrames
+        : Math.max(nextInFrame + 1, Math.round(endTimeSeconds * playerFps)),
     )
     setClipInFrame(nextInFrame)
     setClipOutFrame(nextOutFrame)
-    setTrimViewport(resolveTrimViewport(
+    const nextViewport = resolveTrimViewport(
       nextInFrame,
       nextOutFrame,
       totalTrimFrames,
       playerFps,
-    ))
+    )
+    setTrimViewport(nextViewport)
     setTrimHandleAdjusting(false)
     setActiveTrimHandle(null)
     trimHandleAdjustingRef.current = false
@@ -2308,8 +2789,12 @@ export function FrameRingView({
     setTrimMode(true)
   }, [
     durationSeconds,
+    hasFrameRing,
     hasPlayableVideo,
+    isDragging,
+    isSettling,
     playerFps,
+    playerTimeSeconds,
     settledFrame.timeSeconds,
     totalTrimFrames,
   ])
@@ -2317,7 +2802,13 @@ export function FrameRingView({
   function closeTrimWorkspace() {
     setTrimMode(false)
     setIsPlayerPlaying(false)
-    const nextTime = Math.min(durationSeconds, settledFrame.timeSeconds)
+    const requestedTimeSeconds = hasFrameRing
+      ? settledFrame.timeSeconds
+      : playerTimeSeconds
+    const nextTime = Math.min(
+      projectPlaybackEndSeconds,
+      Math.max(projectPlaybackStartSeconds, requestedTimeSeconds),
+    )
     setPlayerTimeSeconds(nextTime)
     const video = previewVideoRef.current
     if (hasPlayableVideo && video) {
@@ -2409,12 +2900,13 @@ export function FrameRingView({
     trimPointerDragRef.current.pointerId = -1
     setTrimHandleAdjusting(false)
     setActiveTrimHandle(null)
-    setTrimViewport(resolveTrimViewport(
+    const nextViewport = resolveTrimViewport(
       nextInFrame,
       nextOutFrame,
       totalTrimFrames,
       playerFps,
-    ))
+    )
+    setTrimViewport(nextViewport)
   }
 
   function updateClipIn(nextValue: number) {
@@ -2520,12 +3012,88 @@ export function FrameRingView({
     }
   }
 
-  const openStillExportDialog = useCallback(() => {
+  async function saveCurrentTrimRange() {
+    if (!onSaveTrimRange) return
+    setTrimRangePending(true)
+    setActionStatus(savedTrimRange ? '正在更新裁剪范围…' : '正在保存裁剪范围…')
+    try {
+      const result = await onSaveTrimRange({
+        inFrame: clipInFrame,
+        outFrame: clipOutFrame,
+        inSeconds: clipInSeconds,
+        outSeconds: clipOutSeconds,
+      })
+      if (result.ok) {
+        setTrimMode(false)
+        setPlayerTimeSeconds(clipInSeconds)
+        setIsPlayerPlaying(false)
+        const video = previewVideoRef.current
+        if (hasPlayableVideo && video) {
+          video.pause()
+          video.currentTime = clipInSeconds
+        }
+      }
+      setActionStatus(
+        result.message ??
+          (result.ok ? '裁剪范围已保存到当前项目' : '裁剪范围保存失败'),
+      )
+    } catch {
+      setActionStatus('裁剪范围保存失败，请稍后重试')
+    } finally {
+      setTrimRangePending(false)
+    }
+  }
+
+  async function resetCurrentTrimRange() {
+    if (!onResetTrimRange) return
+    setTrimRangePending(true)
+    setActionStatus('正在恢复完整素材…')
+    try {
+      const result = await onResetTrimRange()
+      if (result.ok) {
+        setTrimMode(false)
+        setPlayerTimeSeconds(0)
+        setIsPlayerPlaying(false)
+        const video = previewVideoRef.current
+        if (hasPlayableVideo && video) {
+          video.pause()
+          video.currentTime = 0
+        }
+      }
+      setActionStatus(
+        result.message ??
+          (result.ok ? '已恢复完整素材' : '恢复完整素材失败'),
+      )
+    } catch {
+      setActionStatus('恢复完整素材失败，请稍后重试')
+    } finally {
+      setTrimRangePending(false)
+    }
+  }
+
+  const openStillExportDialog = useCallback((entryTimeSeconds?: number) => {
     if (isDragging || isSettling) return
+    const requestedTimeSeconds = hasFrameRing
+      ? settledFrame.timeSeconds
+      : entryTimeSeconds ??
+        previewVideoRef.current?.currentTime ??
+        playerTimeSeconds
+    const targetTimeSeconds = hasFrameRing
+      ? requestedTimeSeconds
+      : Math.min(
+          Math.max(
+            playbackStartSeconds,
+            playbackEndSeconds - minimumPlaybackDuration,
+          ),
+          Math.max(playbackStartSeconds, requestedTimeSeconds),
+        )
+    const targetTimecode = hasFrameRing
+      ? settledFrame.timecode
+      : formatFrameRingTimecode(targetTimeSeconds, playerFps)
     const target: StillExportTarget = {
       frameId: settledFrame.id,
-      timeSeconds: settledFrame.timeSeconds,
-      timecode: settledFrame.timecode,
+      timeSeconds: targetTimeSeconds,
+      timecode: targetTimecode,
       resolution: clip.resolution,
       sourceFilename: clip.filename,
     }
@@ -2540,6 +3108,7 @@ export function FrameRingView({
     setStillExportDirectory(
       selectedDirectory || getStillExportDirectory(project.title),
     )
+    setQuickExportKind('still')
     setStillExportFilename(defaultFilename)
     setStillExportTarget(target)
     setStillExportDirectoryPicked(Boolean(selectedDirectory))
@@ -2548,13 +3117,40 @@ export function FrameRingView({
   }, [
     clip.filename,
     clip.resolution,
+    hasFrameRing,
     isDragging,
     isSettling,
+    minimumPlaybackDuration,
+    playbackEndSeconds,
+    playbackStartSeconds,
+    playerFps,
+    playerTimeSeconds,
     project.title,
     settledFrame.id,
     settledFrame.timeSeconds,
     settledFrame.timecode,
   ])
+
+  function selectQuickExportKind(nextKind: QuickExportKind) {
+    setQuickExportKind(nextKind)
+    if (!stillExportDirectoryPicked) {
+      setStillExportDirectory(
+        nextKind === 'still'
+          ? getStillExportDirectory(project.title)
+          : getQuickClipExportDirectory(project.title),
+      )
+    }
+    if (nextKind === 'video') {
+      setStillExportFilename(quickClipDefaultFilename)
+      return
+    }
+    if (!stillExportTarget) return
+    setStillExportFilename(getDefaultStillExportFilename(
+      stillExportTarget.sourceFilename,
+      stillExportTarget.timecode,
+      stillExportTarget.resolution,
+    ))
+  }
 
   useEffect(() => {
     if (
@@ -2569,18 +3165,23 @@ export function FrameRingView({
       return
     }
 
-    if (focusTarget.intent === 'export-still' && !hasFrameRing) return
+    if (
+      focusTarget.intent === 'export-still' &&
+      !hasFrameRing &&
+      !hasUnindexedLocalActions
+    ) return
 
     handledEntryIntentRequestRef.current = focusTarget.requestId
     if (focusTarget.intent === 'trim') {
-      openTrimWorkspace()
+      openTrimWorkspace(hasFrameRing ? undefined : focusTarget.timeSeconds)
       return
     }
-    openStillExportDialog()
+    openStillExportDialog(hasFrameRing ? undefined : focusTarget.timeSeconds)
   }, [
     focusTarget,
     getRequestedFrameIndex,
     hasFrameRing,
+    hasUnindexedLocalActions,
     interactive,
     isDragging,
     isSettling,
@@ -2754,6 +3355,61 @@ export function FrameRingView({
     }
   }
 
+  async function confirmQuickClipExport() {
+    const finalDirectory = stillExportDirectory.trim().replace(/[\\/]+$/, '') ||
+      getQuickClipExportDirectory(project.title)
+    const finalFilename = normalizeQuickClipExportFilename(
+      stillExportFilename,
+      quickClipDefaultFilename,
+      quickClipExtension,
+    )
+    setStillExportDirectory(finalDirectory)
+    setStillExportFilename(finalFilename)
+    closeStillExportDialog()
+    if (!onQuickExportClip) {
+      setActionStatus(`快速视频导出任务已创建 · ${finalFilename}`)
+      return
+    }
+
+    setExportPending(true)
+    setActionStatus(
+      savedTrimRange
+        ? '正在快速导出已保存区间…'
+        : '正在快速导出完整视频…',
+    )
+    try {
+      const result = await onQuickExportClip({
+        sourcePath: clip.sourcePath ?? null,
+        sourceFilename: clip.filename,
+        assetId: clip.assetId,
+        inSeconds: quickClipInSeconds,
+        outSeconds: quickClipOutSeconds,
+        directoryPath: finalDirectory,
+        filename: finalFilename,
+        rangeKind: savedTrimRange ? 'project-trim' : 'full-source',
+      })
+      const outputName = result.outputPath?.split(/[\\/]/).pop()
+      setActionStatus(
+        result.message ??
+          (result.ok
+            ? `快速视频导出完成${outputName ? ` · ${outputName}` : ''}`
+            : '快速视频导出失败，请重试'),
+      )
+    } catch {
+      setActionStatus('快速视频导出失败，请检查原视频和保存位置')
+    } finally {
+      setExportPending(false)
+    }
+  }
+
+  async function confirmQuickExport() {
+    if (quickExportKind === 'video') {
+      await confirmQuickClipExport()
+      return
+    }
+    await confirmStillExport()
+  }
+
   const actionPanel = hasFrameRing ? (
     <aside
       className="frameRingActionPanel frameRingFloatingObject"
@@ -2881,12 +3537,12 @@ export function FrameRingView({
       className="frameRingInfoPanel frameRingExportPanel frameRingFloatingObject"
       data-frame-info-visible="true"
       data-export-kind="video"
-      aria-label="视频导出设置"
+      aria-label="片段设置与导出"
     >
       <span className="frameRingInfoBackdrop" aria-hidden="true" />
       <span className="frameRingInfoChrome" aria-hidden="true" />
       <header>
-        <strong>导出设置</strong>
+        <strong>片段设置</strong>
         <Box size={15 * layout.uiScale} strokeWidth={1.35} aria-hidden="true" />
       </header>
       <form
@@ -2956,23 +3612,55 @@ export function FrameRingView({
             <span className="frameRingExportProjectSwitch" aria-hidden="true" />
           </label>
         </div>
-        <button
-          className="frameRingExportButton"
-          type="submit"
-          disabled={exportPending}
-          aria-busy={exportPending}
+        <div
+          className="frameRingExportActions"
+          data-has-save-action={Boolean(onSaveTrimRange)}
         >
-          <Upload size={14 * layout.uiScale} strokeWidth={1.45} />
-          <span>
-            {exportPending
-              ? addExportToCurrentProject
-                ? '正在导出并加入…'
-                : '导出中…'
-              : addExportToCurrentProject
-                ? '导出并加入项目'
-                : '导出'}
-          </span>
-        </button>
+          {onSaveTrimRange && (
+            <button
+              className="frameRingExportButton"
+              type="button"
+              disabled={trimRangePending || exportPending}
+              aria-busy={trimRangePending}
+              onClick={() => void saveCurrentTrimRange()}
+            >
+              <Check size={13 * layout.uiScale} strokeWidth={1.5} />
+              <span>{trimRangePending ? '保存中…' : '保存区间'}</span>
+            </button>
+          )}
+          <button
+            className="frameRingExportButton"
+            type="submit"
+            disabled={exportPending || trimRangePending}
+            aria-busy={exportPending}
+          >
+            <Upload size={14 * layout.uiScale} strokeWidth={1.45} />
+            <span>
+              {exportPending
+                ? addExportToCurrentProject
+                  ? '正在导出并加入…'
+                  : '导出中…'
+                : addExportToCurrentProject
+                  ? onSaveTrimRange
+                    ? '导出并加入'
+                    : '导出并加入项目'
+                  : onSaveTrimRange
+                    ? '导出文件'
+                    : '导出'}
+            </span>
+          </button>
+        </div>
+        {savedTrimRange && onResetTrimRange && (
+          <button
+            className="frameRingTrimResetButton"
+            type="button"
+            disabled={trimRangePending || exportPending}
+            onClick={() => void resetCurrentTrimRange()}
+          >
+            <Undo2 size={11 * layout.uiScale} strokeWidth={1.5} />
+            <span>恢复完整素材</span>
+          </button>
+        )}
         {actionStatus && (
           <p className="frameRingExportStatus" aria-live="polite">{actionStatus}</p>
         )}
@@ -3033,6 +3721,7 @@ export function FrameRingView({
     surface: 'portal' | 'fullscreen' | 'reflection',
   ) => {
     const reflectionProxy = surface === 'reflection'
+    const controlsDisabled = reflectionProxy || sourceOffline
     return (
       <div
         className={`frameRingPreviewControls frameRingPreviewControls${surface[0].toUpperCase()}${surface.slice(1)}`}
@@ -3047,9 +3736,9 @@ export function FrameRingView({
         <button
           className="frameRingPreviewPlayButton"
           type="button"
-          disabled={reflectionProxy}
-          tabIndex={reflectionProxy ? -1 : undefined}
-          onClick={reflectionProxy ? undefined : togglePlayerPlayback}
+          disabled={controlsDisabled}
+          tabIndex={controlsDisabled ? -1 : undefined}
+          onClick={controlsDisabled ? undefined : togglePlayerPlayback}
           aria-label={
             reflectionProxy
               ? undefined
@@ -3069,9 +3758,9 @@ export function FrameRingView({
           <button
             className="frameRingPreviewMuteButton"
             type="button"
-            disabled={reflectionProxy || !hasPlayableVideo}
-            tabIndex={reflectionProxy ? -1 : undefined}
-            onClick={reflectionProxy ? undefined : togglePlayerMute}
+            disabled={controlsDisabled || !hasPlayableVideo}
+            tabIndex={controlsDisabled ? -1 : undefined}
+            onClick={controlsDisabled ? undefined : togglePlayerMute}
             aria-label={
               reflectionProxy
                 ? undefined
@@ -3093,10 +3782,10 @@ export function FrameRingView({
             max={100}
             step={1}
             value={Math.round(effectivePlayerVolume * 100)}
-            disabled={reflectionProxy || !hasPlayableVideo}
-            tabIndex={reflectionProxy ? -1 : undefined}
+            disabled={controlsDisabled || !hasPlayableVideo}
+            tabIndex={controlsDisabled ? -1 : undefined}
             onChange={
-              reflectionProxy
+              controlsDisabled
                 ? undefined
                 : (event) => updatePlayerVolume(Number(event.target.value) / 100)
             }
@@ -3117,10 +3806,10 @@ export function FrameRingView({
             max={playbackEndSeconds}
             step={1 / playerFps}
             value={playerTimeSeconds}
-            disabled={reflectionProxy}
-            tabIndex={reflectionProxy ? -1 : undefined}
+            disabled={controlsDisabled}
+            tabIndex={controlsDisabled ? -1 : undefined}
             onChange={
-              reflectionProxy
+              controlsDisabled
                 ? undefined
                 : (event) => seekPlayer(Number(event.target.value))
             }
@@ -3130,10 +3819,10 @@ export function FrameRingView({
         <button
           className="frameRingPreviewFullscreenButton"
           type="button"
-          disabled={reflectionProxy}
-          tabIndex={reflectionProxy ? -1 : undefined}
+          disabled={controlsDisabled}
+          tabIndex={controlsDisabled ? -1 : undefined}
           onClick={
-            reflectionProxy
+            controlsDisabled
               ? undefined
               : () => void togglePlayerFullscreen()
           }
@@ -3238,6 +3927,7 @@ export function FrameRingView({
         preloadFrames={reflectionPreloadFrames}
         activeFrame={settledFrame}
         clip={clip}
+        infoPanelVisible={infoPanelVisible}
         infoRevision={JSON.stringify({
           annotation: activeAnnotation,
           trimMode,
@@ -3281,8 +3971,14 @@ export function FrameRingView({
                 windowPlaybackControlsVisible && !isPlayerFullscreen
               }
             />
-            <span className="frameRingProjectedGlass frameRingFloatingObject" />
-            <span className="frameRingActionProjectedGlass frameRingFloatingObject" />
+            <span
+              className="frameRingProjectedGlass frameRingFloatingObject"
+              data-projected-glass-visible={infoPanelVisible}
+            />
+            <span
+              className="frameRingActionProjectedGlass frameRingFloatingObject"
+              data-projected-glass-visible={hasFrameRing}
+            />
           </div>
         </div>
       </div>,
@@ -3334,13 +4030,13 @@ export function FrameRingView({
   const bottomActionsPortal = reflectionHost
     ? createPortal(
       <div
-        className={`frameRingBottomActions uiGlassShell ${onlinePlaybackMode ? 'isOnlinePlaybackActions' : ''}`}
+        className={`frameRingBottomActions uiGlassShell ${onlinePlaybackMode ? 'isOnlinePlaybackActions' : hasUnindexedLocalActions ? 'isUnindexedLocalActions' : ''}`}
         role="toolbar"
-        aria-label={onlinePlaybackMode ? '在线视频操作栏' : '帧操作栏'}
+        aria-label={onlinePlaybackMode ? '在线视频操作栏' : hasFrameRing ? '帧操作栏' : '视频操作栏'}
         aria-hidden={
           !interactive ||
           (!onlinePlaybackMode && (
-            !hasFrameRing ||
+            !hasLocalBottomActions ||
             trimMode ||
             stillExportDialogOpen ||
             smartOrganizeDialogOpen
@@ -3350,7 +4046,7 @@ export function FrameRingView({
         inert={
           !interactive ||
           (!onlinePlaybackMode && (
-            !hasFrameRing ||
+            !hasLocalBottomActions ||
             trimMode ||
             stillExportDialogOpen ||
             smartOrganizeDialogOpen
@@ -3359,7 +4055,7 @@ export function FrameRingView({
         data-page-active={
           active && (
             onlinePlaybackMode ||
-            (hasFrameRing && !trimMode && !smartOrganizeDialogOpen)
+            (hasLocalBottomActions && !trimMode && !smartOrganizeDialogOpen)
           )
         }
         data-camera-gesture="block"
@@ -3395,28 +4091,31 @@ export function FrameRingView({
           </>
         ) : (
           <>
-            <button
-              className={activeAnnotation.favorite ? 'active' : ''}
-              type="button"
-              aria-label={activeAnnotation.favorite ? '取消收藏当前帧' : '收藏当前帧'}
-              aria-pressed={activeAnnotation.favorite}
-              onClick={() => updateSettledAnnotation({ favorite: !activeAnnotation.favorite })}
-            >
-              <Star
-                size={20 * layout.uiScale}
-                fill={activeAnnotation.favorite ? 'currentColor' : 'none'}
-                strokeWidth={1.45}
-              />
-              <span>收藏帧</span>
-              <span className="frameRingFavoriteCount" aria-label={`共收藏 ${favoriteCount} 帧`}>
-                {favoriteCount}
-              </span>
-            </button>
+            {hasFrameRing && (
+              <button
+                className={activeAnnotation.favorite ? 'active' : ''}
+                type="button"
+                aria-label={activeAnnotation.favorite ? '取消收藏当前帧' : '收藏当前帧'}
+                aria-pressed={activeAnnotation.favorite}
+                onClick={() => updateSettledAnnotation({ favorite: !activeAnnotation.favorite })}
+              >
+                <Star
+                  size={20 * layout.uiScale}
+                  fill={activeAnnotation.favorite ? 'currentColor' : 'none'}
+                  strokeWidth={1.45}
+                />
+                <span>收藏帧</span>
+                <span className="frameRingFavoriteCount" aria-label={`共收藏 ${favoriteCount} 帧`}>
+                  {favoriteCount}
+                </span>
+              </button>
+            )}
             <button
               type="button"
               data-export-kind="video"
               aria-label="剪辑片段"
-              onClick={openTrimWorkspace}
+              disabled={isDragging || isSettling}
+              onClick={() => openTrimWorkspace()}
             >
               <Scissors size={20 * layout.uiScale} strokeWidth={1.45} />
               <span>剪辑片段</span>
@@ -3424,30 +4123,32 @@ export function FrameRingView({
             <button
               ref={stillExportTriggerRef}
               type="button"
-              data-export-kind="frame"
+              data-export-kind="quick"
               data-export-resolution={clip.resolution}
-              data-export-timecode={settledFrame.timecode}
-              aria-label="导出当前帧"
+              data-export-timecode={hasFrameRing ? settledFrame.timecode : playerTimecode}
+              aria-label="导出单帧或视频"
               disabled={isDragging || isSettling}
-              onClick={openStillExportDialog}
+              onClick={() => openStillExportDialog()}
             >
               <Upload size={20 * layout.uiScale} strokeWidth={1.45} />
               <span>导出</span>
             </button>
-            <button
-              type="button"
-              aria-label="智能整理帧环"
-              disabled={
-                isDragging ||
-                isSettling ||
-                !onScanSmartFrames ||
-                !onApplySmartOrganize
-              }
-              onClick={openSmartOrganizeDialog}
-            >
-              <Sparkles size={20 * layout.uiScale} strokeWidth={1.45} />
-              <span>智能整理</span>
-            </button>
+            {hasFrameRing && (
+              <button
+                type="button"
+                aria-label="智能整理帧环"
+                disabled={
+                  isDragging ||
+                  isSettling ||
+                  !onScanSmartFrames ||
+                  !onApplySmartOrganize
+                }
+                onClick={openSmartOrganizeDialog}
+              >
+                <Sparkles size={20 * layout.uiScale} strokeWidth={1.45} />
+                <span>智能整理</span>
+              </button>
+            )}
           </>
         )}
       </div>,
@@ -3461,7 +4162,7 @@ export function FrameRingView({
         className="overlay frameRingStillExportOverlay"
         role="dialog"
         aria-modal="true"
-        aria-labelledby="frame-ring-still-export-title"
+        aria-labelledby="frame-ring-export-title"
         data-camera-gesture="block"
         onPointerDown={(event) => {
           event.stopPropagation()
@@ -3472,32 +4173,83 @@ export function FrameRingView({
           ref={stillExportDialogRef}
           className="createPanel frameRingStillExportPanel uiGlassShell"
           autoComplete="off"
-          data-export-kind="frame"
-          data-export-frame-id={stillExportTarget.frameId}
-          data-export-timecode={stillExportTarget.timecode}
+          data-export-kind={quickExportKind}
+          data-export-frame-id={
+            quickExportKind === 'still' ? stillExportTarget.frameId : undefined
+          }
+          data-export-timecode={
+            quickExportKind === 'still'
+              ? stillExportTarget.timecode
+              : `${quickClipInTimecode}-${quickClipOutTimecode}`
+          }
           data-export-resolution={stillExportTarget.resolution}
           onKeyDown={handleStillExportDialogKeyDown}
           onSubmit={(event) => {
             event.preventDefault()
-            void confirmStillExport()
+            void confirmQuickExport()
           }}
         >
           <button
             className="panelClose uiGlassInteractive"
             type="button"
-            aria-label="关闭单帧导出"
+            aria-label="关闭导出"
             onClick={() => closeStillExportDialog()}
           >
             <X size={17} />
           </button>
 
           <header className="createPanelHeader frameRingStillExportHeader">
-            <span className="sheetEyebrow">Export Still</span>
-            <h2 id="frame-ring-still-export-title">导出当前帧</h2>
-            <p>
-              时间码 {stillExportTarget.timecode} · {stillExportTarget.resolution}（原始）· PNG
-            </p>
+            <span className="sheetEyebrow">Export</span>
+            <h2 id="frame-ring-export-title">
+              {quickExportKind === 'still' ? '导出当前帧' : '快速导出视频'}
+            </h2>
+            {quickExportKind === 'still' ? (
+              <p>
+                时间码 {stillExportTarget.timecode} · {stillExportTarget.resolution}（原始）· PNG
+              </p>
+            ) : (
+              <p>
+                {savedTrimRange ? '已保存区间' : '完整素材'} · {quickClipDurationTimecode} · {clip.resolution}
+              </p>
+            )}
           </header>
+
+          <div className="frameRingQuickExportKinds" role="group" aria-label="导出内容">
+            <button
+              className={quickExportKind === 'still' ? 'active' : ''}
+              type="button"
+              aria-pressed={quickExportKind === 'still'}
+              onClick={() => selectQuickExportKind('still')}
+            >
+              单帧图片
+            </button>
+            {onQuickExportClip && (
+              <button
+                className={quickExportKind === 'video' ? 'active' : ''}
+                type="button"
+                aria-pressed={quickExportKind === 'video'}
+                onClick={() => selectQuickExportKind('video')}
+              >
+                快速视频
+              </button>
+            )}
+            {onExportClip && (
+              <button
+                type="button"
+                onClick={() => {
+                  closeStillExportDialog(false)
+                  openTrimWorkspace(quickClipInSeconds, quickClipOutSeconds)
+                  window.requestAnimationFrame(() => {
+                    reflectionHost.querySelector<HTMLSelectElement>(
+                      '.frameRingExportPanel select',
+                    )?.focus({ preventScroll: true })
+                  })
+                }}
+              >
+                详细视频导出
+              </button>
+            )}
+          </div>
 
           <div className="projectNameField frameRingStillExportField">
             <span>保存位置</span>
@@ -3508,7 +4260,7 @@ export function FrameRingView({
               data-directory-source={stillExportDirectoryPicked ? 'picker' : 'project-default'}
               aria-busy={stillExportDirectoryPicking}
               aria-disabled={stillExportDirectoryPicking}
-              aria-label={`选择单帧保存文件夹，当前为 ${stillExportDirectory}`}
+              aria-label={`选择导出保存文件夹，当前为 ${stillExportDirectory}`}
               onClick={() => void chooseStillExportDirectory()}
             >
               <FolderOpen size={15} strokeWidth={1.5} aria-hidden="true" />
@@ -3532,21 +4284,32 @@ export function FrameRingView({
               <FileText size={15} strokeWidth={1.5} aria-hidden="true" />
               <input
                 autoFocus
-                name="stillExportFilename"
+                name="exportFilename"
                 value={stillExportFilename}
                 onChange={(event) => setStillExportFilename(event.target.value)}
                 onFocus={(event) => event.currentTarget.select()}
                 maxLength={180}
                 required
-                aria-label="单帧文件名"
+                aria-label={quickExportKind === 'still' ? '单帧文件名' : '视频文件名'}
                 spellCheck={false}
               />
             </span>
           </label>
 
           <div className="createPanelMeta frameRingStillExportMeta">
-            <span><FileText size={14} strokeWidth={1.45} />PNG 无损单帧</span>
-            <span>{stillExportTarget.resolution} · TC {stillExportTarget.timecode}</span>
+            {quickExportKind === 'still' ? (
+              <>
+                <span><FileText size={14} strokeWidth={1.45} />PNG 无损单帧</span>
+                <span>{stillExportTarget.resolution} · TC {stillExportTarget.timecode}</span>
+              </>
+            ) : (
+              <>
+                <span><FileText size={14} strokeWidth={1.45} />保持源格式快速导出</span>
+                <span>
+                  {quickClipExtension.toUpperCase()} · {clip.codec} · TC {quickClipInTimecode}–{quickClipOutTimecode}
+                </span>
+              </>
+            )}
           </div>
 
           <footer className="createPanelActions">
@@ -3564,7 +4327,7 @@ export function FrameRingView({
               aria-busy={exportPending}
             >
               <Upload size={15} strokeWidth={1.65} />
-              导出单帧
+              {quickExportKind === 'still' ? '导出单帧' : '快速导出视频'}
             </button>
           </footer>
         </form>
@@ -3604,7 +4367,6 @@ export function FrameRingView({
             className="panelClose uiGlassInteractive"
             type="button"
             aria-label="关闭智能整理"
-            disabled={isSmartOrganizeBusy()}
             onClick={closeSmartOrganizeDialog}
           >
             <X size={17} />
@@ -4116,6 +4878,13 @@ export function FrameRingView({
                 {!onlinePlaybackMode && (
                   <span className="frameRingPreviewShade" aria-hidden="true" />
                 )}
+                {sourceOffline && !onlinePlaybackMode && (
+                  <span className="frameRingPreviewOffline" role="status">
+                    <VideoOff size={24 * layout.uiScale} strokeWidth={1.3} />
+                    <strong>素材已离线</strong>
+                    <small>帧环仍可浏览，重新连接原文件后可恢复播放</small>
+                  </span>
+                )}
               </span>
               <img className="frameRingPreviewFrame" src="./aurora/video-kuang16x9.png" alt="" />
               <img className="frameRingPreviewLight" src="./aurora/video-kuang-light16x9.png" alt="" />
@@ -4148,17 +4917,18 @@ export function FrameRingView({
               )}
           </div>
 
-          {hasFrameRing && !onlinePlaybackMode && (
-            <>
-              <div
-                className="frameRingInfoPanel frameRingFloatingObject frameRingInfoReflectionProxy"
-                data-frame-reflection="true"
-                data-reflection-project-id="frame-ring-info"
-                data-reflection-index={visibleFrames.length + 1}
-                data-reflection-padded="true"
-                aria-hidden="true"
-              />
+          {!onlinePlaybackMode && infoPanelVisible && (
+            <div
+              className="frameRingInfoPanel frameRingFloatingObject frameRingInfoReflectionProxy"
+              data-frame-reflection="true"
+              data-reflection-project-id="frame-ring-info"
+              data-reflection-index={visibleFrames.length + 1}
+              data-reflection-padded="true"
+              aria-hidden="true"
+            />
+          )}
 
+          {hasFrameRing && !onlinePlaybackMode && (
               <div
                 className="frameRingActionPanel frameRingFloatingObject frameRingActionReflectionProxy"
                 data-frame-reflection="true"
@@ -4167,7 +4937,6 @@ export function FrameRingView({
                 data-reflection-padded="true"
                 aria-hidden="true"
               />
-            </>
           )}
         </div>
       </div>
@@ -4206,20 +4975,36 @@ export function FrameRingView({
             <X size={14 * layout.uiScale} strokeWidth={1.5} />
           </button>
           <div className="frameRingTrimTimeline">
-            <div className="frameRingTrimFilmstrip">
+            <div className="frameRingTrimFilmstrip" ref={trimFilmstripRef}>
               <div className="frameRingTrimVisual" aria-hidden="true">
-                <div
-                  className="frameRingTrimThumbnails"
-                  style={{ gridTemplateColumns: `repeat(${trimTimelineFrames.length}, minmax(0, 1fr))` }}
-                >
-                  {trimTimelineFrames.map(({ frame, key }) => (
-                    <img
-                      key={key}
-                      src={frame.thumbnail}
-                      alt=""
-                      style={{ objectPosition: `${frame.cropX}% ${frame.cropY}%` }}
-                    />
-                  ))}
+                <div className="frameRingTrimThumbnails">
+                  {trimTimelineFrames.map(({
+                    frame,
+                    key,
+                    leftPercent,
+                    widthPercent,
+                  }) =>
+                    frame.thumbnail ? (
+                      <img
+                        key={key}
+                        src={frame.thumbnail}
+                        alt=""
+                        style={{
+                          left: `${leftPercent}%`,
+                          width: `${widthPercent}%`,
+                          objectPosition: `${frame.cropX}% ${frame.cropY}%`,
+                        }}
+                      />
+                    ) : (
+                      <span
+                        key={key}
+                        style={{
+                          left: `${leftPercent}%`,
+                          width: `${widthPercent}%`,
+                        }}
+                      />
+                    ),
+                  )}
                 </div>
                 <span className="frameRingTrimShade frameRingTrimShadeStart" />
                 <span className="frameRingTrimShade frameRingTrimShadeEnd" />

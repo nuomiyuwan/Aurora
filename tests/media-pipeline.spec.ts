@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import { execFile as execFileCallback } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -42,6 +42,9 @@ const { createMediaPipeline } = require('../electron/mediaPipeline.cjs') as {
         timeSeconds: number
       }>
       timestampMode: string
+      playbackPath: string
+      previewPath: string | null
+      usesPreviewProxy: boolean
       version: number
     }>
     ensureMediaPreview: (request: {
@@ -566,6 +569,25 @@ test('preview-only proxy is cached without creating a visual index', async () =>
       usesPreviewProxy: true,
     })
     expect('frames' in reused).toBe(false)
+
+    const indexed = await pipeline.buildVisualIndex({
+      assetId,
+      operationId: 'preview-only-index-generate',
+      sourcePath,
+    })
+    expect(indexed).toMatchObject({
+      cached: false,
+      playbackPath: await realpath(sourcePath),
+      previewPath: null,
+      usesPreviewProxy: false,
+    })
+    expect(
+      progress.some(
+        (entry) =>
+          entry.kind === 'visual-index' &&
+          entry.phase === 'transcoding-preview',
+      ),
+    ).toBe(false)
   } finally {
     if (previousFfmpegPath == null) {
       delete process.env.AURORA_FFMPEG_PATH

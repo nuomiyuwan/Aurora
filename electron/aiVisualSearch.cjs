@@ -7,6 +7,8 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 45_000
 const MAX_QUERY_LENGTH = 600
 const MAX_CANDIDATE_COUNT = 2_000
 const MAX_RESULT_COUNT = 100
+const MAX_FRAME_SEQUENCE_COUNT = 24
+const MAX_FRAME_SEQUENCE_IMAGE_COUNT = 8
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 const MAX_VISION_BATCH_BYTES = 24 * 1024 * 1024
 const MAX_CONTACT_SHEET_BYTES = 10 * 1024 * 1024
@@ -219,8 +221,85 @@ function normalizeFrameAnalysisRequest(request) {
     )
   }
 
+  const descriptionStyle = request.descriptionStyle ?? 'search-index'
+  if (!['search-index', 'frame-note'].includes(descriptionStyle)) {
+    throw new AiVisualSearchError(
+      'AI_SEARCH_INVALID_INPUT',
+      '关键帧描述样式无效。',
+    )
+  }
+
   return {
     candidates: normalizeFrameCandidates(request.candidates),
+    operationId:
+      request.operationId == null
+        ? null
+        : boundedString(request.operationId, '分析任务 ID', 128),
+    profileId:
+      request.profileId == null
+        ? null
+        : boundedString(request.profileId, '模型服务 ID', 128),
+    visionProfileId:
+      request.visionProfileId == null && request.visionServiceId == null
+        ? null
+        : boundedString(
+            request.visionProfileId ?? request.visionServiceId,
+            '画面理解服务 ID',
+            128,
+          ),
+    descriptionStyle,
+  }
+}
+
+function normalizeFrameSequenceSummaryRequest(request) {
+  if (!request || typeof request !== 'object' || !Array.isArray(request.frames)) {
+    throw new AiVisualSearchError(
+      'AI_SEARCH_INVALID_INPUT',
+      '帧环备注汇总请求无效。',
+    )
+  }
+  if (
+    request.frames.length < 1 ||
+    request.frames.length > MAX_FRAME_SEQUENCE_COUNT
+  ) {
+    throw new AiVisualSearchError(
+      'AI_SEARCH_INVALID_INPUT',
+      '帧环备注数量无效。',
+    )
+  }
+  const seenFrameIds = new Set()
+  const frames = request.frames.map((frame) => {
+    if (!frame || typeof frame !== 'object') {
+      throw new AiVisualSearchError(
+        'AI_SEARCH_INVALID_INPUT',
+        '帧环备注无效。',
+      )
+    }
+    const frameId = boundedString(frame.frameId, '关键帧 ID')
+    if (seenFrameIds.has(frameId)) {
+      throw new AiVisualSearchError(
+        'AI_SEARCH_INVALID_INPUT',
+        '帧环备注包含重复关键帧。',
+      )
+    }
+    seenFrameIds.add(frameId)
+    return {
+      frameId,
+      timeSeconds: finiteNonNegativeNumber(frame.timeSeconds, '关键帧时间'),
+      note: optionalBoundedString(frame.note, 160),
+      tags: normalizeStringList(frame.tags, 12, 40),
+      imagePath: optionalBoundedString(frame.imagePath, 8_192),
+    }
+  }).filter((frame) => frame.note || frame.tags.length > 0)
+  if (frames.length === 0) {
+    throw new AiVisualSearchError(
+      'AI_SEARCH_INVALID_INPUT',
+      '帧环中还没有可汇总的标签或备注。',
+    )
+  }
+  frames.sort((left, right) => left.timeSeconds - right.timeSeconds)
+  return {
+    frames,
     profileId:
       request.profileId == null
         ? null
@@ -407,6 +486,17 @@ function visionServiceFingerprint(service) {
     .update(normalized.baseUrl)
     .update('\0')
     .update(normalized.model)
+    .digest('hex')
+}
+
+function frameAnalysisDescriptionFingerprint(service, descriptionStyle) {
+  const baseFingerprint = visionServiceFingerprint(service)
+  if (descriptionStyle !== 'frame-note') return baseFingerprint
+  return crypto
+    .createHash('sha256')
+    .update('aurora-frame-note-v1')
+    .update('\0')
+    .update(baseFingerprint)
     .digest('hex')
 }
 
@@ -802,9 +892,13 @@ async function postProviderJson({
   apiKey,
   body,
   timeoutMs,
+  signal,
 }) {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  const forwardAbort = () => controller.abort()
+  if (signal?.aborted) forwardAbort()
+  else signal?.addEventListener('abort', forwardAbort, { once: true })
   try {
     const headers = { 'Content-Type': 'application/json' }
     if (typeof apiKey === 'string' && apiKey !== '') {
@@ -827,6 +921,12 @@ async function postProviderJson({
     return await readProviderJson(response)
   } catch (error) {
     if (error instanceof AiVisualSearchError) throw error
+    if (signal?.aborted) {
+      throw new AiVisualSearchError(
+        'AI_SEARCH_CANCELLED',
+        '画面分析已取消。',
+      )
+    }
     if (error?.name === 'AbortError') {
       throw new AiVisualSearchError(
         'AI_SEARCH_TIMEOUT',
@@ -841,7 +941,16 @@ async function postProviderJson({
     )
   } finally {
     clearTimeout(timeout)
+    signal?.removeEventListener('abort', forwardAbort)
   }
+}
+
+function throwIfAnalysisCancelled(signal) {
+  if (!signal?.aborted) return
+  throw new AiVisualSearchError(
+    'AI_SEARCH_CANCELLED',
+    '画面分析已取消。',
+  )
 }
 
 function extractChatCompletionText(response) {
@@ -918,6 +1027,214 @@ function parseVisionDescriptions(response, expectedCount) {
   }
 
   return Array.from({ length: expectedCount }, (_, slot) => bySlot.get(slot))
+}
+
+const CAMERA_MOTION_LABELS = {
+  fixed: '固定镜头',
+  'pan-left': '向左摇镜',
+  'pan-right': '向右摇镜',
+  'tilt-up': '向上摇镜',
+  'tilt-down': '向下摇镜',
+  'push-in': '推镜头',
+  'pull-out': '拉镜头',
+  tracking: '跟随镜头',
+  handheld: '手持运动',
+}
+
+function parseFrameSequenceSummary(response) {
+  const parsed = parseLooseJson(extractChatCompletionText(response))
+  const note = Array.from(optionalBoundedString(parsed?.note, 120))
+    .slice(0, 40)
+    .join('')
+  const tags = normalizeStringList(parsed?.tags, 6, 12)
+  const motionType = optionalBoundedString(parsed?.cameraMotion?.type, 32)
+  const motionConfidence = Math.min(
+    1,
+    Math.max(0, Number(parsed?.cameraMotion?.confidence) || 0),
+  )
+  const motionLabel = CAMERA_MOTION_LABELS[motionType]
+  const cameraMotion = motionLabel && motionConfidence >= 0.72
+    ? {
+        type: motionType,
+        label: motionLabel,
+        confidence: motionConfidence,
+      }
+    : null
+  if (!note && tags.length === 0) {
+    throw new AiVisualSearchError(
+      'AI_SEARCH_BAD_RESPONSE',
+      'AI 没有返回可用的片段备注。',
+    )
+  }
+  return { note, tags, cameraMotion }
+}
+
+async function summarizeFrameSequenceOnce({
+  frames,
+  service,
+  fetchImpl,
+  timeoutMs,
+  mediaRoot,
+  fileSystem,
+  contactSheetComposer,
+}) {
+  const visualCandidates = frames.filter((frame) => frame.imagePath)
+  const selectedVisualFrames = visualCandidates.length <= MAX_FRAME_SEQUENCE_IMAGE_COUNT
+    ? visualCandidates
+    : Array.from({ length: MAX_FRAME_SEQUENCE_IMAGE_COUNT }, (_, index) =>
+        visualCandidates[
+          Math.round(
+            (index * (visualCandidates.length - 1)) /
+              (MAX_FRAME_SEQUENCE_IMAGE_COUNT - 1),
+          )
+        ],
+      )
+  const loadedVisualFrames = []
+  let loadedVisualBytes = 0
+  for (const frame of selectedVisualFrames) {
+    try {
+      const managedFrame = await validateManagedFramePath({
+        imagePath: frame.imagePath,
+        mediaRoot,
+        fileSystem,
+      })
+      const imageBytes = await fileSystem.readFile(managedFrame.imagePath)
+      if (
+        imageBytes.byteLength < 1 ||
+        imageBytes.byteLength > MAX_IMAGE_BYTES ||
+        loadedVisualBytes + imageBytes.byteLength > MAX_VISION_BATCH_BYTES
+      ) {
+        continue
+      }
+      loadedVisualBytes += imageBytes.byteLength
+      loadedVisualFrames.push({
+        imageBytes,
+        mimeType: managedFrame.mimeType,
+        slot: frames.indexOf(frame),
+      })
+    } catch {
+      continue
+    }
+  }
+  const imageContent = await visionImageContent({
+    loadedBatch: loadedVisualFrames,
+    contactSheetComposer,
+    preferContactSheet: isLikelyLocalModelService(service),
+  })
+  const visualSlots = new Set(loadedVisualFrames.map((frame) => frame.slot))
+  const evidence = frames.map((frame, slot) => ({
+    slot,
+    timeSeconds: Number(frame.timeSeconds.toFixed(3)),
+    note: frame.note,
+    tags: frame.tags,
+    visualFrame: visualSlots.has(slot),
+  }))
+  const schema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      note: { type: 'string' },
+      tags: {
+        type: 'array',
+        maxItems: 6,
+        items: { type: 'string' },
+      },
+      cameraMotion: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          type: {
+            type: 'string',
+            enum: [
+              'fixed',
+              'pan-left',
+              'pan-right',
+              'tilt-up',
+              'tilt-down',
+              'push-in',
+              'pull-out',
+              'tracking',
+              'handheld',
+              'unknown',
+            ],
+          },
+          confidence: { type: 'number', minimum: 0, maximum: 1 },
+        },
+        required: ['type', 'confidence'],
+      },
+    },
+    required: ['note', 'tags', 'cameraMotion'],
+  }
+  const baseBody = {
+    model: service.model,
+    temperature: 0.1,
+    max_tokens: 700,
+    messages: [{
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: [
+            '你是影视素材整理助手。下面是按时间排序的帧环标签、逐帧备注和少量代表画面。请综合为一条不超过40个中文字符的素材备注和最多6个标签。不要逐帧罗列，不要写“包含……等画面”，不要输出“新导入”。',
+            imageContent.contactSheet
+              ? `代表画面是一张联系表，共 ${imageContent.contactSheet.columns} 列、${imageContent.contactSheet.rows} 行，按从左到右、从上到下排列，每格数字对应 slot。`
+              : loadedVisualFrames.length > 0
+                ? '代表画面会按 slot 编号逐张提供。'
+                : '本次没有可用的代表画面，不要仅凭主体位置变化猜测镜头运动。',
+            '判断镜头运动时必须比较不同时刻的背景、透视、景别和视点变化；主体自身移动不能当作摄像机运动。只有连续画面明确支持时才返回推、拉、摇、移、跟随或手持，否则 cameraMotion.type 必须为 unknown。若镜头运动明确，可把它自然写进备注并作为标签。只返回 JSON。',
+            JSON.stringify(evidence),
+          ].join('\n'),
+        },
+        ...imageContent.content,
+      ],
+    }],
+  }
+  const variants = isLikelyLocalModelService(service)
+    ? [
+        { structured: true, reasoning: true },
+        { structured: true, reasoning: false },
+        { structured: false, reasoning: true },
+        { structured: false, reasoning: false },
+      ]
+    : [
+        { structured: true, reasoning: false },
+        { structured: false, reasoning: false },
+      ]
+  let lastError = null
+  for (const variant of variants) {
+    const body = { ...baseBody }
+    if (variant.reasoning) body.reasoning_effort = 'none'
+    if (variant.structured) {
+      body.response_format = {
+        type: 'json_schema',
+        json_schema: {
+          name: 'aurora_frame_sequence_summary',
+          strict: true,
+          schema,
+        },
+      }
+    }
+    try {
+      return parseFrameSequenceSummary(await postProviderJson({
+        fetchImpl,
+        url: providerEndpoint(service.baseUrl, 'chat/completions'),
+        apiKey: service.apiKey,
+        timeoutMs,
+        body,
+      }))
+    } catch (error) {
+      lastError = error
+      if (
+        error instanceof AiVisualSearchError &&
+        error.code === 'AI_SEARCH_BAD_RESPONSE' &&
+        variant.structured
+      ) {
+        continue
+      }
+      if (!isVisionRequestCompatibilityError(error)) throw error
+    }
+  }
+  throw lastError
 }
 
 function isLikelyLocalModelService(service) {
@@ -1112,7 +1429,10 @@ async function describeFrameBatchOnce({
   connectionTest = false,
   contactSheetComposer = null,
   requestContext,
+  descriptionStyle = 'search-index',
+  signal,
 }) {
+  throwIfAnalysisCancelled(signal)
   const loadedBatch = await loadVisionBatchImages({ batch, fileSystem })
   const localService = isLikelyLocalModelService(service)
   const imageContent = await visionImageContent({
@@ -1124,11 +1444,14 @@ async function describeFrameBatchOnce({
   const layoutInstruction = imageContent.contactSheet
     ? `下面是一张包含 ${batch.length} 个关键帧的联系表，共 ${imageContent.contactSheet.columns} 列、${imageContent.contactSheet.rows} 行，按从左到右、从上到下排列；每格左上角白色数字就是 slot。`
     : '下面会按编号逐张提供关键帧，slot 就是图片前的编号。'
+  const descriptionInstruction = descriptionStyle === 'frame-note'
+    ? '你正在为帧环中的单帧生成备注。每格 descriptionZh 必须是不超过 20 个字符的完整中文短句，优先概括主体、动作或状态与场景；景别或视点特征明显时简短保留，只写最重要的画面信息；不要句号、省略号、标题前缀或重复词。descriptionEn 同样保持简短，并继续提供便于添加标签的中英文关键词。'
+    : '为每格输出简洁的中文与英文描述，以及便于视觉语义搜索的中英文关键词。'
   const content = [
     {
       type: 'text',
       text:
-        `${connectionTest ? '这是连接测试，必须实际读取全部画面并按正式索引格式作答。' : ''}你是影视素材的视觉检索索引器。${layoutInstruction}${exactSlots}逐格分析，只描述画面中实际可见的主体、人物动作、场景、环境、构图、镜头景别、光线、色彩、天气、时间氛围和可辨识物体；不要猜测人物身份或故事。为每格输出简洁的中文与英文描述，以及便于视觉语义搜索的中英文关键词。只返回 JSON，不要 Markdown。格式为 {"frames":[{"slot":0,"descriptionZh":"","descriptionEn":"","keywordsZh":[],"keywordsEn":[]}]}。`,
+        `${connectionTest ? '这是连接测试，必须实际读取全部画面并按正式索引格式作答。' : ''}你是影视素材的视觉检索索引器。${layoutInstruction}${exactSlots}逐格分析，只描述画面中实际可见的主体、人物动作、场景、环境、构图、镜头景别、光线、色彩、天气、时间氛围和可辨识物体；不要猜测人物身份或故事。${descriptionInstruction}只返回 JSON，不要 Markdown。格式为 {"frames":[{"slot":0,"descriptionZh":"","descriptionEn":"","keywordsZh":[],"keywordsEn":[]}]}。`,
     },
     ...imageContent.content,
   ]
@@ -1157,6 +1480,7 @@ async function describeFrameBatchOnce({
       apiKey: service.apiKey,
       timeoutMs: Math.max(1, Math.min(timeoutMs, remainingMs)),
       body,
+      signal,
     })
   }
 
@@ -1459,6 +1783,7 @@ function createAiVisualSearchService({
     'compatible-frame-index-v2.json',
   )
   let operationQueue = Promise.resolve()
+  const analysisOperations = new Map()
 
   async function readActiveServiceBundle() {
     let legacyProfile = null
@@ -1618,8 +1943,9 @@ function createAiVisualSearchService({
     }
   }
 
-  async function executeAnalyzeFrames(rawRequest) {
+  async function executeAnalyzeFrames(rawRequest, signal) {
     const request = normalizeFrameAnalysisRequest(rawRequest)
+    throwIfAnalysisCancelled(signal)
     if (request.candidates.length === 0) {
       return {
         frames: [],
@@ -1632,6 +1958,7 @@ function createAiVisualSearchService({
       vision: visionService,
       legacyProfile,
     } = await readActiveServiceBundle()
+    throwIfAnalysisCancelled(signal)
     if (!visionService) {
       throw new AiVisualSearchError(
         'AI_SEARCH_VISION_PROFILE_NOT_CONFIGURED',
@@ -1653,9 +1980,13 @@ function createAiVisualSearchService({
       )
     }
 
-    const descriptionFingerprint = visionServiceFingerprint(visionService)
+    const descriptionFingerprint = frameAnalysisDescriptionFingerprint(
+      visionService,
+      request.descriptionStyle,
+    )
     const preparedCandidates = []
     for (const candidate of request.candidates) {
+      throwIfAnalysisCancelled(signal)
       const prepared = await loadManagedFrameForAnalysis({
         candidate,
         mediaRoot,
@@ -1668,7 +1999,10 @@ function createAiVisualSearchService({
           descriptionFingerprint,
           prepared.imageFingerprint,
         ),
-        legacyCacheKey: frameCacheKey(candidate, descriptionFingerprint),
+        legacyCacheKey:
+          request.descriptionStyle === 'search-index'
+            ? frameCacheKey(candidate, descriptionFingerprint)
+            : null,
       })
     }
 
@@ -1692,6 +2026,7 @@ function createAiVisualSearchService({
       index < missingDescriptions.length;
       index += VISION_BATCH_SIZE
     ) {
+      throwIfAnalysisCancelled(signal)
       const batch = missingDescriptions.slice(index, index + VISION_BATCH_SIZE)
       const descriptions = await describeFrameBatch({
         batch,
@@ -1700,7 +2035,10 @@ function createAiVisualSearchService({
         fileSystem,
         timeoutMs: requestTimeoutMs,
         contactSheetComposer,
+        descriptionStyle: request.descriptionStyle,
+        signal,
       })
+      throwIfAnalysisCancelled(signal)
       const updatedAt = now().toISOString()
       for (let offset = 0; offset < batch.length; offset += 1) {
         const candidate = batch[offset]
@@ -1722,7 +2060,9 @@ function createAiVisualSearchService({
         // Keep the legacy search key current as a compatibility alias. The
         // analysis entry itself never trusts that weaker key because it lacks
         // timestamp and image-content identity.
-        cache.entries[candidate.legacyCacheKey] = { ...entry }
+        if (candidate.legacyCacheKey) {
+          cache.entries[candidate.legacyCacheKey] = { ...entry }
+        }
       }
       newlyAnalyzedFrameCount += batch.length
       const batchNumber = Math.floor(index / VISION_BATCH_SIZE) + 1
@@ -1749,6 +2089,43 @@ function createAiVisualSearchService({
       analyzedFrameCount: preparedCandidates.length,
       newlyAnalyzedFrameCount,
     }
+  }
+
+  async function executeSummarizeFrameSequence(rawRequest) {
+    const request = normalizeFrameSequenceSummaryRequest(rawRequest)
+    const {
+      vision: visionService,
+      legacyProfile,
+    } = await readActiveServiceBundle()
+    if (!visionService) {
+      throw new AiVisualSearchError(
+        'AI_SEARCH_VISION_PROFILE_NOT_CONFIGURED',
+        '请先在探索页设置中配置画面理解服务。',
+      )
+    }
+    const legacyProfileMatches =
+      !request.profileId ||
+      legacyProfile?.id === request.profileId ||
+      visionService.id === request.profileId
+    if (
+      !legacyProfileMatches ||
+      (request.visionProfileId &&
+        visionService.id !== request.visionProfileId)
+    ) {
+      throw new AiVisualSearchError(
+        'AI_SEARCH_PROFILE_CHANGED',
+        '分析期间画面理解服务发生了切换，请重新分析。',
+      )
+    }
+    return summarizeFrameSequenceOnce({
+      frames: request.frames,
+      service: visionService,
+      fetchImpl,
+      timeoutMs: requestTimeoutMs,
+      mediaRoot,
+      fileSystem,
+      contactSheetComposer,
+    })
   }
 
   async function executeSearch(rawRequest) {
@@ -1998,9 +2375,50 @@ function createAiVisualSearchService({
   }
 
   function analyzeFrames(request) {
+    const operationId = request?.operationId == null
+      ? null
+      : boundedString(request.operationId, '分析任务 ID', 128)
+    const controller = operationId ? new AbortController() : null
+    if (operationId && controller) {
+      analysisOperations.get(operationId)?.abort()
+      analysisOperations.set(operationId, controller)
+    }
+    const execute = () => executeAnalyzeFrames(request, controller?.signal)
     const task = operationQueue.then(
-      () => executeAnalyzeFrames(request),
-      () => executeAnalyzeFrames(request),
+      execute,
+      execute,
+    ).finally(() => {
+      if (
+        operationId &&
+        controller &&
+        analysisOperations.get(operationId) === controller
+      ) {
+        analysisOperations.delete(operationId)
+      }
+    })
+    operationQueue = task.then(
+      () => undefined,
+      () => undefined,
+    )
+    return task
+  }
+
+  function cancelOperation(input) {
+    const operationId = boundedString(
+      typeof input === 'string' ? input : input?.operationId,
+      '分析任务 ID',
+      128,
+    )
+    const controller = analysisOperations.get(operationId)
+    if (!controller) return false
+    controller.abort()
+    return true
+  }
+
+  function summarizeFrameSequence(request) {
+    const task = operationQueue.then(
+      () => executeSummarizeFrameSequence(request),
+      () => executeSummarizeFrameSequence(request),
     )
     operationQueue = task.then(
       () => undefined,
@@ -2102,6 +2520,8 @@ function createAiVisualSearchService({
   return {
     search,
     analyzeFrames,
+    cancelOperation,
+    summarizeFrameSequence,
     cleanCache,
     inspectCache,
     removeAssetCache,

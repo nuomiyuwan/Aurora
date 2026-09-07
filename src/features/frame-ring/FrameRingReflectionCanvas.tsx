@@ -55,6 +55,7 @@ export interface FrameRingReflectionCanvasProps {
   preloadFrames?: readonly FrameRingFrame[]
   activeFrame: FrameRingFrame
   clip: FrameRingClipSource
+  infoPanelVisible: boolean
   infoRevision: string
   interactionActive: boolean
   motionSignal: string
@@ -109,6 +110,7 @@ export function FrameRingReflectionCanvas({
   preloadFrames = [],
   activeFrame,
   clip,
+  infoPanelVisible,
   infoRevision,
   interactionActive,
   motionSignal,
@@ -176,28 +178,36 @@ export function FrameRingReflectionCanvas({
         cover: activeFrame.thumbnail,
         updatedAt: activeFrame.timecode,
       },
+      ...(infoPanelVisible
+        ? [{
+            ...sourceTemplate,
+            id: 'frame-ring-info',
+            title: `Frame  ${activeFrame.timecode}`,
+            subtitle: `${clip.resolution} · ${clip.codec}`,
+            cover: activeFrame.thumbnail,
+            updatedAt: clip.duration,
+          }]
+        : []),
       ...(frames.length > 0
-        ? [
-            {
-              ...sourceTemplate,
-              id: 'frame-ring-info',
-              title: `Frame  ${activeFrame.timecode}`,
-              subtitle: `${clip.resolution} · ${clip.codec}`,
-              cover: activeFrame.thumbnail,
-              updatedAt: clip.duration,
-            },
-            {
-              ...sourceTemplate,
-              id: 'frame-ring-action',
-              title: `Frame actions  ${activeFrame.timecode}`,
-              subtitle: `${clip.resolution} · ${clip.codec}`,
-              cover: activeFrame.thumbnail,
-              updatedAt: clip.duration,
-            },
-          ]
+        ? [{
+            ...sourceTemplate,
+            id: 'frame-ring-action',
+            title: `Frame actions  ${activeFrame.timecode}`,
+            subtitle: `${clip.resolution} · ${clip.codec}`,
+            cover: activeFrame.thumbnail,
+            updatedAt: clip.duration,
+          }]
         : []),
     ]
-  }, [activeFrame, clip.codec, clip.duration, clip.resolution, frameSources, frames.length])
+  }, [
+    activeFrame,
+    clip.codec,
+    clip.duration,
+    clip.resolution,
+    frameSources,
+    frames.length,
+    infoPanelVisible,
+  ])
   const retainedSources = useMemo(() => {
     const sourcesById = new Map<string, Project>()
     reflectionSources.forEach((source) => sourcesById.set(source.id, source))

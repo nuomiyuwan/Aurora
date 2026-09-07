@@ -29,6 +29,10 @@ export default defineConfig({
   build: {
     chunkSizeWarningLimit: 700,
     rolldownOptions: {
+      input: {
+        main: 'index.html',
+        player: 'player.html',
+      },
       output: {
         codeSplitting: {
           groups: [

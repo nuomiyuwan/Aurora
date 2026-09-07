@@ -74,8 +74,12 @@ contextBridge.exposeInMainWorld('desktopBridge', {
     }
   },
   inspectMediaFile: (filePath) => ipcRenderer.invoke('media-file:inspect', filePath),
+  isMediaFileAvailable: (filePath) =>
+    ipcRenderer.invoke('media-file:available', filePath),
   createMediaThumbnail: (request) =>
     ipcRenderer.invoke('media-thumbnail:create', request),
+  ensureTimelineThumbnail: (request) =>
+    ipcRenderer.invoke('media-timeline-thumbnail:ensure', request),
   removeMediaAssetData: (assetId) =>
     ipcRenderer.invoke('media-asset-data:remove', { assetId }),
   inspectAppCache: (retainedAssetIds) =>
@@ -181,6 +185,8 @@ contextBridge.exposeInMainWorld('desktopBridge', {
     ipcRenderer.invoke('model-render:save', request),
   selectDirectory: (options) => ipcRenderer.invoke('media-directory:select', options),
   selectSavePath: (options) => ipcRenderer.invoke('media-save-path:select', options),
+  exportProjectEditManifest: (request) =>
+    ipcRenderer.invoke('project-edit-manifest:export', request),
   createMediaOperationId,
   getMediaUrl: (filePath) => encodeMediaPath(filePath),
   ensureMediaPreview: (request) =>
@@ -301,6 +307,10 @@ contextBridge.exposeInMainWorld('desktopBridge', {
     ipcRenderer.invoke('ai:visual-search:search', request),
   analyzeAiVisualFrames: (request) =>
     ipcRenderer.invoke('ai:visual-search:analyze-frames', request),
+  cancelAiVisualOperation: (operationId) =>
+    ipcRenderer.invoke('ai:visual-search:cancel-operation', { operationId }),
+  summarizeAiFrameSequence: (request) =>
+    ipcRenderer.invoke('ai:visual-search:summarize-frame-sequence', request),
   getEmbyConnection: () => ipcRenderer.invoke('emby:connection:get'),
   testEmbyConnection: (request) => ipcRenderer.invoke('emby:connection:test', request),
   disconnectEmby: () => ipcRenderer.invoke('emby:connection:disconnect'),

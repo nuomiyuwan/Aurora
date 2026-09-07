@@ -16,6 +16,18 @@ test('normalizes visual keywords and creates a concise Chinese frame note', () =
   })
 })
 
+test('keeps a complete concise clause instead of appending a truncation ellipsis', () => {
+  const suggestion = createFrameRingAnnotationSuggestion({
+    frameId: 'frame-long-note',
+    descriptionZh: '航拍镜头展示大型工业园区与纵横交错的道路，远处可见连绵山脉和清晨薄雾。',
+    keywordsZh: ['工业园区', '航拍', '道路'],
+  })
+
+  expect(suggestion.note).toBe('航拍镜头展示大型工业园区与纵横交错的道路')
+  expect(Array.from(suggestion.note)).toHaveLength(20)
+  expect(suggestion.note).not.toContain('…')
+})
+
 test('collects blank and duplicate removal candidates without selecting keep frames', () => {
   const frameIds = getFrameRingSmartExcludedFrameIds({
     version: 1,

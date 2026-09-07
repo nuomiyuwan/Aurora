@@ -52,6 +52,15 @@ export type MediaAsset = {
   online?: OnlineMediaDescriptor
 }
 
+export type ProjectTrimRange = {
+  sourceFingerprint: string
+  inFrame: number
+  outFrame: number
+  inSeconds: number
+  outSeconds: number
+  updatedAt: string
+}
+
 export type ProjectAssetRef = {
   id: string
   projectId: string
@@ -61,6 +70,7 @@ export type ProjectAssetRef = {
   tags: string[]
   annotated: boolean
   note: string
+  trimRange?: ProjectTrimRange
 }
 
 export type MediaVisualIndexFrame = {

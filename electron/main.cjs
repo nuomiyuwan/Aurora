@@ -44,6 +44,7 @@ const { createModelAssetManager } = require('./modelAssets.cjs')
 const { createWindowRevealGate } = require('./windowRevealGate.cjs')
 const { toggleWindowFullscreen } = require('./windowControls.cjs')
 const { createExternalVideoOpenBroker } = require('./externalVideoOpen.cjs')
+const { createStandalonePlayer } = require('./standalonePlayer.cjs')
 const { createAppUpdateManager } = require('./appUpdater.cjs')
 const { cleanupAppUpdateCache } = require('./appUpdateCacheCleanup.cjs')
 const { createMacDmgInstaller } = require('./macDmgUpdate.cjs')
@@ -85,8 +86,6 @@ const {
 
 const isDev = !app.isPackaged
 const STARTUP_VISUAL_READY_CHANNEL = 'startup:visual-ready'
-const EXTERNAL_VIDEO_FILES_CHANNEL = 'external-video-files:open'
-const EXTERNAL_VIDEO_RENDERER_READY_CHANNEL = 'external-video-files:renderer-ready'
 const WINDOW_MINIMIZE_CHANNEL = 'window-controls:minimize'
 const WINDOW_TOGGLE_MAXIMIZE_CHANNEL = 'window-controls:toggle-maximize'
 const WINDOW_TOGGLE_FULLSCREEN_CHANNEL = 'window-controls:toggle-fullscreen'
@@ -120,6 +119,7 @@ let douyinSessionManager = null
 let onlineProviderRegistry = null
 let appUpdateManager = null
 let mainWindow = null
+let standalonePlayer = null
 let createWindowPromise = null
 let windowCreationReady = false
 const revealedWindows = new WeakSet()
@@ -160,9 +160,7 @@ function focusMainWindow() {
 }
 
 function enqueueExternalVideoPaths(filePaths) {
-  const accepted = externalVideoOpenBroker.enqueue(filePaths)
-  if (accepted.length > 0) focusMainWindow()
-  return accepted
+  return externalVideoOpenBroker.enqueue(filePaths)
 }
 
 function getWindowsControlTarget(event) {
@@ -187,8 +185,7 @@ if (!hasSingleInstanceLock) {
   app.quit()
 } else {
   app.on('second-instance', (_event, argv) => {
-    enqueueExternalVideoPaths(argv)
-    focusMainWindow()
+    if (enqueueExternalVideoPaths(argv).length === 0) focusMainWindow()
   })
 }
 
@@ -507,6 +504,51 @@ function normalizeDialogFilters(input) {
   return filters.length > 0 ? filters : undefined
 }
 
+const PROJECT_EDIT_MANIFEST_MAX_BYTES = 64 * 1024 * 1024
+
+function normalizeProjectEditManifestRequest(request) {
+  if (!request || typeof request !== 'object') {
+    throw new TypeError('剪辑清单内容无效')
+  }
+  const json = typeof request.json === 'string' ? request.json : ''
+  const markdown = typeof request.markdown === 'string' ? request.markdown : ''
+  if (!json || !markdown) throw new TypeError('剪辑清单内容为空')
+  if (
+    Buffer.byteLength(json, 'utf8') > PROJECT_EDIT_MANIFEST_MAX_BYTES ||
+    Buffer.byteLength(markdown, 'utf8') > PROJECT_EDIT_MANIFEST_MAX_BYTES
+  ) {
+    throw new RangeError('剪辑清单内容过大')
+  }
+  const rawFilename =
+    typeof request.defaultFilename === 'string'
+      ? path.basename(request.defaultFilename.trim())
+      : ''
+  const filenameBase = path.parse(rawFilename || 'Aurora项目-剪辑清单').name
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-')
+    .trim()
+    .slice(0, 120)
+  return {
+    json,
+    markdown,
+    defaultFilename: `${filenameBase || 'Aurora项目-剪辑清单'}.json`,
+  }
+}
+
+async function writeUtf8FileAtomic(destinationPath, content) {
+  const temporaryPath = `${destinationPath}.tmp-${process.pid}-${Date.now()}`
+  try {
+    await fs.promises.writeFile(temporaryPath, content, {
+      encoding: 'utf8',
+      mode: 0o600,
+    })
+    await fs.promises.rm(destinationPath, { force: true })
+    await fs.promises.rename(temporaryPath, destinationPath)
+  } catch (error) {
+    await fs.promises.rm(temporaryPath, { force: true }).catch(() => undefined)
+    throw error
+  }
+}
+
 function registerMediaFileProtocol() {
   protocol.handle(MEDIA_URL_SCHEME, async (request) => {
     const filePath = decodeMediaUrl(request.url)
@@ -737,7 +779,6 @@ async function createWindow() {
   windowInstance.once('closed', disposeYoukuPlayerWebviewGuard)
   windowInstance.once('closed', disposeDouyinPlayerWebviewGuard)
   windowInstance.once('closed', () => {
-    externalVideoOpenBroker.clearConsumer()
     onlineProviderRegistry?.closeWindows()
     if (mainWindow === windowInstance) mainWindow = null
   })
@@ -865,6 +906,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   mediaPipeline = createMediaPipeline({
     userDataPath: app.getPath('userData'),
     onProgress: (payload) => {
+      standalonePlayer?.onProgress(payload)
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('media:progress', payload)
       }
@@ -1062,32 +1104,6 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     return captureYoukuEmbeddedFrame(event.sender, request)
   })
 
-  ipcMain.on(EXTERNAL_VIDEO_RENDERER_READY_CHANNEL, (event) => {
-    if (
-      !mainWindow ||
-      mainWindow.isDestroyed() ||
-      event.sender !== mainWindow.webContents
-    ) {
-      return
-    }
-    const webContents = event.sender
-    const sendToReadyRenderer = (descriptors) => {
-      if (webContents.isDestroyed()) throw new Error('Renderer is unavailable')
-      webContents.send(EXTERNAL_VIDEO_FILES_CHANNEL, descriptors)
-    }
-    const clearReadyRenderer = () => {
-      externalVideoOpenBroker.clearConsumer(sendToReadyRenderer)
-      webContents.removeListener('did-start-loading', clearReadyRenderer)
-      webContents.removeListener('destroyed', clearReadyRenderer)
-    }
-    externalVideoOpenBroker.setConsumer(sendToReadyRenderer)
-    // A reload keeps WebContents alive, while its renderer listener disappears.
-    // Disconnect before navigation so queued files survive until the next ready
-    // handshake instead of being acknowledged into an unlistened renderer.
-    webContents.once('did-start-loading', clearReadyRenderer)
-    webContents.once('destroyed', clearReadyRenderer)
-  })
-
   ipcMain.handle('project-folder:select', async () => {
     const result = await dialog.showOpenDialog({
       title: '选择项目文件夹',
@@ -1142,8 +1158,28 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     return inspectMediaFile(filePath)
   })
 
+  ipcMain.handle('media-file:available', async (_event, filePath) => {
+    if (
+      typeof filePath !== 'string' ||
+      filePath.trim() === '' ||
+      filePath.includes('\0') ||
+      !path.isAbsolute(filePath)
+    ) {
+      return false
+    }
+    try {
+      return (await fs.promises.stat(filePath)).isFile()
+    } catch {
+      return false
+    }
+  })
+
   ipcMain.handle('media-thumbnail:create', async (_event, request) => {
     return mediaPipeline.createMediaThumbnail(request)
+  })
+
+  ipcMain.handle('media-timeline-thumbnail:ensure', async (_event, request) => {
+    return mediaPipeline.ensureTimelineThumbnail(request)
   })
 
   ipcMain.handle('media-asset-data:remove', async (_event, request) => {
@@ -1230,6 +1266,28 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     })
 
     return result.canceled ? null : result.filePath ?? null
+  })
+
+  ipcMain.handle('project-edit-manifest:export', async (_event, request) => {
+    const normalized = normalizeProjectEditManifestRequest(request)
+    const result = await dialog.showSaveDialog({
+      title: '导出 Aurora 剪辑清单',
+      defaultPath: normalized.defaultFilename,
+      buttonLabel: '导出清单',
+      filters: [{ name: 'Aurora 剪辑清单', extensions: ['json'] }],
+      showsTagField: false,
+    })
+    if (result.canceled || !result.filePath) return null
+
+    const selected = path.parse(result.filePath)
+    const baseName = selected.ext.toLowerCase() === '.json'
+      ? selected.name
+      : selected.base
+    const jsonPath = path.join(selected.dir, `${baseName}.json`)
+    const markdownPath = path.join(selected.dir, `${baseName}.md`)
+    await writeUtf8FileAtomic(jsonPath, normalized.json)
+    await writeUtf8FileAtomic(markdownPath, normalized.markdown)
+    return { jsonPath, markdownPath }
   })
 
   ipcMain.handle('media-index:build', async (_event, request) => {
@@ -1422,6 +1480,18 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
       aiVisualSearchService.analyzeFrames(request),
     ),
   )
+  ipcMain.handle(
+    'ai:visual-search:cancel-operation',
+    aiVisualSearchIpcHandler((request) =>
+      aiVisualSearchService.cancelOperation(request),
+    ),
+  )
+  ipcMain.handle(
+    'ai:visual-search:summarize-frame-sequence',
+    aiVisualSearchIpcHandler((request) =>
+      aiVisualSearchService.summarizeFrameSequence(request),
+    ),
+  )
 
   ipcMain.handle(
     'emby:connection:get',
@@ -1452,14 +1522,19 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     embyIpcHandler((request) => embyManager.getEmbyPlaybackInfo(request)),
   )
 
+  standalonePlayer = createStandalonePlayer({ isDev, mediaPipeline, readAppData })
+  const openingExternalVideo = externalVideoOpenBroker.pendingCount() > 0
+  externalVideoOpenBroker.setConsumer(standalonePlayer.openFiles)
   windowCreationReady = true
-  void ensureMainWindow()
-    .then(() => {
-      appUpdateManager?.scheduleAutomaticCheck()
-    })
-    .catch((error) => {
-      console.warn('[Aurora updater] Unable to schedule automatic check', error)
-    })
+  if (!openingExternalVideo) {
+    void ensureMainWindow()
+      .then(() => {
+        appUpdateManager?.scheduleAutomaticCheck()
+      })
+      .catch((error) => {
+        console.warn('[Aurora updater] Unable to schedule automatic check', error)
+      })
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

@@ -18,6 +18,10 @@ const LIGHTWEIGHT_PREVIEW_GOP_FRAMES = 6
 const MEDIA_THUMBNAIL_VERSION = 1
 const MEDIA_THUMBNAIL_MAX_WIDTH = 960
 const MEDIA_THUMBNAIL_SAMPLE_FRAMES = 24
+const TIMELINE_THUMBNAIL_VERSION = 1
+const TIMELINE_THUMBNAIL_WIDTH = 240
+const TIMELINE_THUMBNAIL_HEIGHT = 135
+const TIMELINE_THUMBNAIL_JPEG_QUALITY = 4
 const MAX_CONCURRENT_MEDIA_THUMBNAILS = 2
 const MIN_INDEX_FRAME_COUNT = 10
 const MAX_INDEX_FRAME_COUNT = 1200
@@ -540,6 +544,54 @@ async function runSpawnedFfmpeg(args, operation, progressOptions = {}) {
   )
 }
 
+function createHardwareDecodeInputArgs(metadata, platform = process.platform) {
+  const codec =
+    typeof metadata?.codec === 'string' ? metadata.codec.toLowerCase() : ''
+  if (
+    platform !== 'darwin' ||
+    !new Set(['h264', 'hevc', 'h265']).has(codec)
+  ) {
+    return []
+  }
+  return ['-hwaccel', 'videotoolbox']
+}
+
+function insertInputOptions(args, inputOptions) {
+  if (inputOptions.length === 0) return args
+  const inputIndex = args.indexOf('-i')
+  if (inputIndex < 0) return args
+  return [
+    ...args.slice(0, inputIndex),
+    ...inputOptions,
+    ...args.slice(inputIndex),
+  ]
+}
+
+async function runSpawnedFfmpegWithDecodeFallback(
+  args,
+  operation,
+  progressOptions,
+  metadata,
+  beforeSoftwareRetry = null,
+) {
+  const hardwareInputArgs = createHardwareDecodeInputArgs(metadata)
+  if (hardwareInputArgs.length === 0) {
+    return runSpawnedFfmpeg(args, operation, progressOptions)
+  }
+
+  try {
+    await runSpawnedFfmpeg(
+      insertInputOptions(args, hardwareInputArgs),
+      operation,
+      progressOptions,
+    )
+  } catch (error) {
+    if (operation.cancelled || error?.code !== 'FFMPEG_FAILED') throw error
+    await beforeSoftwareRetry?.()
+    await runSpawnedFfmpeg(args, operation, progressOptions)
+  }
+}
+
 function createOperation(registry, kind, requestedId, context, progressListener) {
   const operationId = resolveOperationId(requestedId)
   if (registry.has(operationId)) {
@@ -614,6 +666,19 @@ function createIndexScaleFilter() {
     'force_original_aspect_ratio=decrease',
     'force_divisible_by=2',
   ].join(':')
+}
+
+function createUniformIndexFilterArgs(uniformFilter, shouldDetectScenes) {
+  if (!shouldDetectScenes) {
+    return ['-map', '0:v:0', '-vf', uniformFilter]
+  }
+
+  const filterGraph = [
+    '[0:v:0]split=2[uniform_input][scene_input]',
+    `[uniform_input]${uniformFilter}[uniform_output]`,
+    `[scene_input]select='isnan(prev_selected_t)+gt(scene,${INDEX_SCENE_CHANGE_THRESHOLD})',showinfo,nullsink`,
+  ].join(';')
+  return ['-filter_complex', filterGraph, '-map', '[uniform_output]']
 }
 
 function createSceneChangeParser() {
@@ -816,6 +881,74 @@ function mediaThumbnailFilename(sourcePath, sourceStat) {
   return `thumbnail-${revision}.jpg`
 }
 
+function timelineThumbnailSourceRevision(sourcePath, sourceStat) {
+  return crypto
+    .createHash('sha256')
+    .update(sourcePath)
+    .update('\0')
+    .update(String(sourceStat.size))
+    .update('\0')
+    .update(sourceStat.mtime.toISOString())
+    .digest('hex')
+    .slice(0, 32)
+}
+
+function timelineThumbnailTimeMicroseconds(value) {
+  const timeSeconds = finiteNumber(value, 'Timeline thumbnail time')
+  const timeMicroseconds = Math.round(timeSeconds * 1_000_000)
+  if (!Number.isSafeInteger(timeMicroseconds)) {
+    throw mediaError(
+      'MEDIA_INVALID_INPUT',
+      'Timeline thumbnail time is outside the supported range',
+    )
+  }
+  return timeMicroseconds
+}
+
+async function readReusableTimelineThumbnail(
+  thumbnailPath,
+  assetId,
+  sourcePath,
+  sourceStat,
+  sourceRevision,
+  timeSeconds,
+) {
+  try {
+    const thumbnailStat = await fs.promises.stat(thumbnailPath)
+    if (!thumbnailStat.isFile() || thumbnailStat.size <= 0) return null
+    return {
+      assetId,
+      sourcePath,
+      sourceRevision,
+      timeSeconds,
+      thumbnailPath,
+      sizeBytes: sourceStat.size,
+      modifiedAt: sourceStat.mtime.toISOString(),
+      cached: true,
+      createdAt: thumbnailStat.mtime.toISOString(),
+    }
+  } catch {
+    return null
+  }
+}
+
+async function assertTimelineThumbnailSourceUnchanged(
+  sourcePath,
+  sourceStat,
+) {
+  const currentSource = await validateMediaFilePath(sourcePath)
+  if (
+    currentSource.filePath !== sourcePath ||
+    currentSource.stat.size !== sourceStat.size ||
+    currentSource.stat.mtime.toISOString() !== sourceStat.mtime.toISOString()
+  ) {
+    throw mediaError(
+      'MEDIA_SOURCE_CHANGED',
+      'The source media changed while creating timeline thumbnails',
+    )
+  }
+}
+
 async function readReusableMediaThumbnail(
   targetDirectory,
   assetId,
@@ -996,23 +1129,22 @@ async function readReusableManifest(
   targetDirectory,
   sourcePath,
   metadata,
-  previewRequired,
 ) {
   try {
     const manifestPath = path.join(targetDirectory, 'manifest.json')
     const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'))
+    const usesPreviewProxy = manifest?.usesPreviewProxy === true
+    const hasValidPlaybackPath = usesPreviewProxy
+      ? typeof manifest?.previewPath === 'string' &&
+        manifest?.playbackPath === manifest.previewPath
+      : manifest?.previewPath === null && manifest?.playbackPath === sourcePath
     if (
       manifest?.version !== INDEX_VERSION ||
       manifest?.timestampMode !== INDEX_TIMESTAMP_MODE ||
       manifest?.sourcePath !== sourcePath ||
       manifest?.metadata?.sizeBytes !== metadata.sizeBytes ||
       manifest?.metadata?.modifiedAt !== metadata.modifiedAt ||
-      manifest?.usesPreviewProxy !== previewRequired ||
-      (previewRequired
-        ? typeof manifest?.previewPath !== 'string' ||
-          manifest?.playbackPath !== manifest.previewPath
-        : manifest?.previewPath !== null ||
-          manifest?.playbackPath !== sourcePath) ||
+      !hasValidPlaybackPath ||
       !Array.isArray(manifest?.frames) ||
       manifest.frames.length === 0
     ) {
@@ -1036,7 +1168,7 @@ async function readReusableManifest(
 
     const requiredFiles = [
       manifest.posterPath,
-      ...(previewRequired ? [manifest.previewPath] : []),
+      ...(usesPreviewProxy ? [manifest.previewPath] : []),
       ...manifest.frames.map((frame) => frame?.imagePath),
     ]
     if (
@@ -1297,6 +1429,7 @@ function createMediaPipeline({ userDataPath, onProgress }) {
   const indexLocks = new Set()
   const previewTasks = new Map()
   const thumbnailTasks = new Map()
+  const timelineThumbnailTasks = new Map()
   const removingAssetIds = new Set()
   let activeThumbnailTasks = 0
   const thumbnailWaiters = []
@@ -1694,6 +1827,150 @@ function createMediaPipeline({ userDataPath, onProgress }) {
     }
   }
 
+  async function ensureTimelineThumbnail(request) {
+    const assetId = validateAssetId(request?.assetId)
+    const { filePath: sourcePath, stat: sourceStat } =
+      await validateMediaFilePath(request?.sourcePath)
+    const timeMicroseconds = timelineThumbnailTimeMicroseconds(
+      request?.timeSeconds,
+    )
+    const timeSeconds = timeMicroseconds / 1_000_000
+    const sourceRevision = timelineThumbnailSourceRevision(
+      sourcePath,
+      sourceStat,
+    )
+    const targetDirectory = path.join(
+      userDataPath,
+      'media',
+      mediaDirectoryHash(assetId),
+      'timeline',
+      `v${TIMELINE_THUMBNAIL_VERSION}`,
+      sourceRevision,
+      `${TIMELINE_THUMBNAIL_WIDTH}x${TIMELINE_THUMBNAIL_HEIGHT}-q${TIMELINE_THUMBNAIL_JPEG_QUALITY}`,
+    )
+    const thumbnailPath = path.join(
+      targetDirectory,
+      `thumb-${String(timeMicroseconds).padStart(16, '0')}.jpg`,
+    )
+    const runningTask = timelineThumbnailTasks.get(thumbnailPath)
+    if (runningTask) return runningTask
+
+    const task = withOperation(
+      'timeline-thumbnail',
+      request,
+      { assetId, sourcePath },
+      async (operation) => {
+        if (!request?.rebuild) {
+          const reusable = await readReusableTimelineThumbnail(
+            thumbnailPath,
+            assetId,
+            sourcePath,
+            sourceStat,
+            sourceRevision,
+            timeSeconds,
+          )
+          if (reusable) {
+            operation.report({
+              phase: 'complete',
+              progress: 1,
+              processedSeconds: timeSeconds,
+              totalSeconds: timeSeconds,
+            })
+            return { ...reusable, operationId: operation.operationId }
+          }
+        }
+
+        return withThumbnailSlot(operation, async () => {
+          await fs.promises.mkdir(targetDirectory, { recursive: true })
+          const tempPath = temporaryOutputPath(
+            thumbnailPath,
+            operation.operationId,
+          )
+          await fs.promises.rm(tempPath, { force: true })
+          try {
+            const args = [
+              '-hide_banner',
+              '-loglevel',
+              'error',
+              '-y',
+              ...(timeSeconds > 0 ? ['-ss', timeSeconds.toFixed(6)] : []),
+              '-i',
+              sourcePath,
+              '-map',
+              '0:v:0',
+              '-an',
+              '-vf',
+              `scale=${TIMELINE_THUMBNAIL_WIDTH}:${TIMELINE_THUMBNAIL_HEIGHT}:force_original_aspect_ratio=increase,crop=${TIMELINE_THUMBNAIL_WIDTH}:${TIMELINE_THUMBNAIL_HEIGHT}`,
+              '-frames:v',
+              '1',
+              '-q:v',
+              String(TIMELINE_THUMBNAIL_JPEG_QUALITY),
+              '-fps_mode:v',
+              'vfr',
+              '-progress',
+              'pipe:1',
+              '-nostats',
+              tempPath,
+            ]
+            await runSpawnedFfmpeg(args, operation, {
+              phase: 'extracting-thumbnail',
+              progressStart: 0.05,
+              progressEnd: 0.9,
+            })
+            if (operation.cancelled) {
+              throw mediaError(
+                'MEDIA_CANCELLED',
+                'The media thumbnail operation was cancelled',
+              )
+            }
+            const thumbnailStat = await fs.promises.stat(tempPath)
+            if (!thumbnailStat.isFile() || thumbnailStat.size <= 0) {
+              throw mediaError(
+                'MEDIA_THUMBNAIL_EMPTY',
+                'ffmpeg did not produce a timeline thumbnail',
+              )
+            }
+            await assertTimelineThumbnailSourceUnchanged(
+              sourcePath,
+              sourceStat,
+            )
+            await atomicReplace(tempPath, thumbnailPath)
+            const createdAt = new Date().toISOString()
+            operation.report({
+              phase: 'complete',
+              progress: 1,
+              processedSeconds: timeSeconds,
+              totalSeconds: timeSeconds,
+            })
+            return {
+              operationId: operation.operationId,
+              assetId,
+              sourcePath,
+              sourceRevision,
+              timeSeconds,
+              thumbnailPath,
+              sizeBytes: sourceStat.size,
+              modifiedAt: sourceStat.mtime.toISOString(),
+              cached: false,
+              createdAt,
+            }
+          } catch (error) {
+            await fs.promises.rm(tempPath, { force: true })
+            throw error
+          }
+        })
+      },
+    )
+    timelineThumbnailTasks.set(thumbnailPath, task)
+    try {
+      return await task
+    } finally {
+      if (timelineThumbnailTasks.get(thumbnailPath) === task) {
+        timelineThumbnailTasks.delete(thumbnailPath)
+      }
+    }
+  }
+
   async function ensureMediaPreview(request) {
     const assetId = validateAssetId(request?.assetId)
     const { filePath: sourcePath } =
@@ -1795,10 +2072,11 @@ function createMediaPipeline({ userDataPath, onProgress }) {
         await fs.promises.mkdir(tempDirectory, { recursive: true })
 
         try {
-          await runSpawnedFfmpeg(
-            isLightweightPreview
-              ? createLightweightPreviewProxyArgs(sourcePath, tempPreviewPath)
-              : createPreviewProxyArgs(sourcePath, tempPreviewPath),
+          const previewArgs = isLightweightPreview
+            ? createLightweightPreviewProxyArgs(sourcePath, tempPreviewPath)
+            : createPreviewProxyArgs(sourcePath, tempPreviewPath)
+          await runSpawnedFfmpegWithDecodeFallback(
+            previewArgs,
             operation,
             {
               durationSeconds: metadata.durationSeconds,
@@ -1806,6 +2084,8 @@ function createMediaPipeline({ userDataPath, onProgress }) {
               progressStart: 0.05,
               progressEnd: 0.94,
             },
+            metadata,
+            () => fs.promises.rm(tempPreviewPath, { force: true }),
           )
           if (operation.cancelled) {
             throw mediaError(
@@ -1918,14 +2198,11 @@ function createMediaPipeline({ userDataPath, onProgress }) {
             processedSeconds: 0,
             totalSeconds: metadata.durationSeconds,
           })
-          const previewRequired = requiresPreviewProxy(metadata)
-
           if (!request?.rebuild) {
             const reusable = await readReusableManifest(
               targetDirectory,
               sourcePath,
               metadata,
-              previewRequired,
             )
             if (reusable) {
               operation.report({
@@ -1957,24 +2234,22 @@ function createMediaPipeline({ userDataPath, onProgress }) {
             )
             const uniformStatsPath = path.join(uniformDirectory, 'frame-map.txt')
             const samplingRate = targetFrameCount / metadata.durationSeconds
-            const frameProgressEnd = previewRequired ? 0.52 : 0.94
+            const frameProgressEnd = 0.94
             const shouldDetectScenes = targetFrameCount < MAX_INDEX_FRAME_COUNT
             const uniformProgressEnd = shouldDetectScenes
-              ? previewRequired
-                ? 0.36
-                : 0.68
+              ? 0.68
               : frameProgressEnd
             const uniformFilter = [
               `fps=${samplingRate}`,
               createIndexScaleFilter(),
             ].join(',')
-            const sceneChangeParser = createSceneChangeParser()
+            let sceneChangeParser = createSceneChangeParser()
             const commonUniformOutputArgs = [
-              '-map',
-              '0:v:0',
+              ...createUniformIndexFilterArgs(
+                uniformFilter,
+                shouldDetectScenes,
+              ),
               '-an',
-              '-vf',
-              uniformFilter,
               '-frames:v',
               String(targetFrameCount),
               '-q:v',
@@ -1997,23 +2272,11 @@ function createMediaPipeline({ userDataPath, onProgress }) {
               '-i',
               sourcePath,
               ...commonUniformOutputArgs,
-              ...(shouldDetectScenes
-                ? [
-                    '-map',
-                    '0:v:0',
-                    '-an',
-                    '-vf',
-                    `select='isnan(prev_selected_t)+gt(scene,${INDEX_SCENE_CHANGE_THRESHOLD})',showinfo`,
-                    '-f',
-                    'null',
-                    '-',
-                  ]
-                : []),
               '-progress',
               'pipe:1',
               '-nostats',
             ]
-            await runSpawnedFfmpeg(uniformArgs, operation, {
+            const uniformProgressOptions = {
               durationSeconds: metadata.durationSeconds,
               phase: 'extracting',
               progressStart: 0.05,
@@ -2021,7 +2284,24 @@ function createMediaPipeline({ userDataPath, onProgress }) {
               onStderr: shouldDetectScenes
                 ? (chunk) => sceneChangeParser.append(chunk)
                 : null,
-            })
+            }
+            await runSpawnedFfmpegWithDecodeFallback(
+              uniformArgs,
+              operation,
+              uniformProgressOptions,
+              metadata,
+              async () => {
+                await fs.promises.rm(uniformDirectory, {
+                  recursive: true,
+                  force: true,
+                })
+                await fs.promises.mkdir(uniformDirectory)
+                sceneChangeParser = createSceneChangeParser()
+                uniformProgressOptions.onStderr = shouldDetectScenes
+                  ? (chunk) => sceneChangeParser.append(chunk)
+                  : null
+              },
+            )
             if (operation.cancelled) {
               throw mediaError('MEDIA_CANCELLED', 'The media operation was cancelled')
             }
@@ -2105,12 +2385,24 @@ function createMediaPipeline({ userDataPath, onProgress }) {
                 '-nostats',
                 sceneOutputPattern,
               ]
-              await runSpawnedFfmpeg(sceneArgs, operation, {
-                durationSeconds: metadata.durationSeconds,
-                phase: 'extracting-scenes',
-                progressStart: uniformProgressEnd,
-                progressEnd: frameProgressEnd,
-              })
+              await runSpawnedFfmpegWithDecodeFallback(
+                sceneArgs,
+                operation,
+                {
+                  durationSeconds: metadata.durationSeconds,
+                  phase: 'extracting-scenes',
+                  progressStart: uniformProgressEnd,
+                  progressEnd: frameProgressEnd,
+                },
+                metadata,
+                async () => {
+                  await fs.promises.rm(sceneDirectory, {
+                    recursive: true,
+                    force: true,
+                  })
+                  await fs.promises.mkdir(sceneDirectory)
+                },
+              )
               if (operation.cancelled) {
                 throw mediaError(
                   'MEDIA_CANCELLED',
@@ -2181,29 +2473,6 @@ function createMediaPipeline({ userDataPath, onProgress }) {
               }
             })
             const posterPath = frames[Math.floor(frames.length / 2)].imagePath
-            const previewPath = previewRequired
-              ? path.join(targetDirectory, 'preview.mp4')
-              : null
-
-            if (previewRequired) {
-              const tempPreviewPath = path.join(tempDirectory, 'preview.mp4')
-              await runSpawnedFfmpeg(
-                createPreviewProxyArgs(sourcePath, tempPreviewPath),
-                operation,
-                {
-                  durationSeconds: metadata.durationSeconds,
-                  phase: 'transcoding-preview',
-                  progressStart: frameProgressEnd,
-                  progressEnd: 0.94,
-                },
-              )
-              if (operation.cancelled) {
-                throw mediaError(
-                  'MEDIA_CANCELLED',
-                  'The media operation was cancelled',
-                )
-              }
-            }
 
             const manifest = {
               version: INDEX_VERSION,
@@ -2211,9 +2480,9 @@ function createMediaPipeline({ userDataPath, onProgress }) {
               assetId,
               sourcePath,
               posterPath,
-              previewPath,
-              playbackPath: previewPath ?? sourcePath,
-              usesPreviewProxy: previewRequired,
+              previewPath: null,
+              playbackPath: sourcePath,
+              usesPreviewProxy: false,
               frames,
               metadata,
               createdAt: new Date().toISOString(),
@@ -2493,6 +2762,7 @@ function createMediaPipeline({ userDataPath, onProgress }) {
     cancelOperation,
     cleanMediaCache,
     createMediaThumbnail,
+    ensureTimelineThumbnail,
     ensureMediaPreview,
     exportClip,
     exportStill,
@@ -2509,8 +2779,10 @@ module.exports = {
     chooseIndexFrameCount,
     chooseSceneChangeCandidates,
     createBalancedSceneSelectionExpression,
+    createHardwareDecodeInputArgs,
     createIndexScaleFilter,
     createSceneChangeParser,
+    createUniformIndexFilterArgs,
     mergeIndexFrameEntries,
     readFrameTimestampStats,
   },

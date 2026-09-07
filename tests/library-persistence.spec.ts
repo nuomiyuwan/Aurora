@@ -341,6 +341,94 @@ test('保存时按项目引用重算视频数，不持久化漂移计数', () =>
   expect(serialized.projects[0].videoCount).toBe(2)
 })
 
+test('项目裁剪范围可持久化并从 schema v6 多区间迁移最后一次范围', () => {
+  const project = {
+    id: 'trim-project',
+    title: '裁剪项目',
+    subtitle: '',
+    cover: '',
+    videoCount: 1,
+    collectionCount: 0,
+    updatedAt: '2026-08-21 12:00',
+  }
+  const asset: MediaAsset = {
+    id: 'trim-asset',
+    filename: 'A001_C001.mov',
+    thumbnail: null,
+    duration: '00:12',
+    resolution: '3840 × 2160',
+    fps: '24 fps',
+    frameCount: '288',
+    sampleCount: 0,
+    size: '120 MB',
+    codec: 'ProRes 422 HQ',
+    camera: '未知设备',
+    capturedAt: '2026-08-21 12:00',
+    sourceFingerprint: 'trim-source',
+    sourcePath: '/Volumes/Media/A001_C001.mov',
+    favorite: false,
+    indexTask: 'idle',
+    durationSeconds: 12,
+    width: 3840,
+    height: 2160,
+    fpsValue: 24,
+    sizeBytes: 120 * 1024 ** 2,
+    indexError: null,
+  }
+  const earlierRange = {
+    sourceFingerprint: asset.sourceFingerprint,
+    inFrame: 24,
+    outFrame: 96,
+    inSeconds: 1,
+    outSeconds: 4,
+    updatedAt: '2026-08-21T04:00:00.000Z',
+  }
+  const latestRange = {
+    sourceFingerprint: asset.sourceFingerprint,
+    inFrame: 72,
+    outFrame: 192,
+    inSeconds: 3,
+    outSeconds: 8,
+    updatedAt: '2026-08-21T05:00:00.000Z',
+  }
+  const reference = {
+    id: 'trim-reference',
+    projectId: project.id,
+    assetId: asset.id,
+    order: 0,
+    thumbnailFollowsProject: true,
+    tags: [],
+    annotated: false,
+    note: '',
+    trimRange: latestRange,
+  }
+  const serialized = serializePersistentLibrary({
+    projects: [project],
+    mediaAssets: [asset],
+    projectAssetRefs: [reference],
+    projectTitles: { [project.id]: project.title },
+    selectedProjectId: project.id,
+  })
+
+  expect(
+    parsePersistentLibrary({ library: serialized })?.projectAssetRefs[0]
+      .trimRange,
+  ).toEqual(latestRange)
+
+  const { trimRange: _discarded, ...legacyReference } = reference
+  const migrated = parsePersistentLibrary({
+    library: {
+      ...serialized,
+      schemaVersion: 6,
+      projectAssetRefs: [{
+        ...legacyReference,
+        clipSelections: [earlierRange, latestRange],
+      }],
+    },
+  })
+  expect(migrated?.projectAssetRefs[0].trimRange).toEqual(latestRange)
+})
+
 test('空封面不会被解析为当前文档地址', () => {
   expect(resolveDocumentAssetUrl('', 'file:///Aurora/dist/index.html')).toBe('')
 })

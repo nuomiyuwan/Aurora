@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src aurora-media:; connect-src 'self' ws://127.0.0.1:5174" />
+    <title>Aurora 播放器</title>
+  </head>
+  <body>
+    <main id="player" aria-label="独立视频播放器"></main>
+    <section id="status" role="status" aria-live="polite" data-busy="true">
+      <p id="message">正在打开视频…</p>
+      <button id="retry" type="button" hidden>重试</button>
+    </section>
+    <script type="module" src="/src/features/standalone-player/main.ts"></script>
+  </body>
+</html>

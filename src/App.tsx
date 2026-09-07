@@ -32,6 +32,7 @@ import {
   Star,
   Trash2,
   Video,
+  VideoOff,
   X,
 } from 'lucide-react'
 import { WindowsWindowControls } from './features/window-controls/WindowsWindowControls'
@@ -73,7 +74,14 @@ import type {
   MediaVisualIndex,
   OnlineMediaDescriptor,
   ProjectAssetRef,
+  ProjectTrimRange,
 } from './data/mediaLibraryTypes'
+import {
+  createProjectEditManifest,
+  createProjectEditManifestJson,
+  createProjectEditManifestMarkdown,
+  getProjectEditManifestDefaultFilename,
+} from './data/projectEditManifest'
 import {
   ONLINE_MEDIA_PROVIDER_IDS,
   createDefaultOnlineProviderEnabledState,
@@ -120,6 +128,9 @@ import {
   FrameRingView,
   type FrameAnnotation as FrameRingAnnotation,
   type FrameRingClipExportRequest,
+  type FrameRingQuickClipExportRequest,
+  type FrameRingTrimRangeSaveRequest,
+  type FrameRingTrimRangeSaveResult,
   type FrameRingExportResult,
   type FrameRingStillExportRequest,
 } from './features/frame-ring/FrameRingView'
@@ -135,6 +146,7 @@ import { resolveFrameRingLayout } from './features/frame-ring/frameRingLayout'
 import type { FrameRingEntryIntent } from './features/frame-ring/frameRingEntryIntent'
 import {
   createFrameRingFrames,
+  canOpenUnavailableFrameRingSource,
   formatFrameRingTimecode,
   getDefaultFrameIndex,
   getFrameRingReflectionPreloadFrames,
@@ -430,6 +442,7 @@ type VideoClip = {
   thumbnail: string
   duration: string
   durationSeconds: number | null
+  sourceDurationSeconds: number | null
   resolution: string
   resolutionBadge: string | null
   width: number | null
@@ -458,6 +471,7 @@ type VideoClip = {
   tags: string[]
   annotated: boolean
   note: string
+  trimRange: ProjectTrimRange | null
   colorPreset: MediaColorPresetId
   online?: OnlineMediaDescriptor
 }
@@ -468,6 +482,8 @@ type ClipHoverScrubVideoPortal = {
   poster: string
   target: HTMLElement
   lightweight: boolean
+  playbackStartSeconds: number
+  playbackEndSeconds: number | null
 }
 
 type ClipHoverScrubSession = {
@@ -477,6 +493,8 @@ type ClipHoverScrubSession = {
   hitTarget: HTMLElement
   progress: number
   sourceUrl: string | null
+  playbackStartSeconds: number
+  playbackEndSeconds: number | null
   lastFrameIndex: number
   frameLoadVersion: number
 }
@@ -513,6 +531,11 @@ type LightweightPreviewState = {
   sourcePath: string
   playbackPath: string | null
   error: string | null
+}
+
+type MediaSourceAvailabilityState = {
+  sourcePath: string
+  available: boolean
 }
 
 type FrameRingFocusTarget = {
@@ -689,6 +712,7 @@ type ClipAiMetadataTarget = {
   evidenceRevision: string
   evidenceTier: 'thumbnail' | 'visual-index'
   candidates: AiVisualFrameCandidate[]
+  frameAnnotations: AiFrameSequenceAnnotation[]
 }
 
 type ClipAiMetadataAnalysisResult = {
@@ -803,6 +827,30 @@ function formatImportedDuration(seconds: number | null) {
   return hours > 0
     ? `${pad(hours)}:${pad(minutes)}:${pad(remainingSeconds)}`
     : `${pad(minutes)}:${pad(remainingSeconds)}`
+}
+
+function resolveProjectTrimRange(
+  reference: ProjectAssetRef | undefined,
+  asset: MediaAsset,
+): ProjectTrimRange | null {
+  const range = reference?.trimRange
+  if (
+    !range ||
+    range.sourceFingerprint !== asset.sourceFingerprint ||
+    !Number.isFinite(range.inSeconds) ||
+    !Number.isFinite(range.outSeconds) ||
+    range.inSeconds < 0 ||
+    range.outSeconds <= range.inSeconds
+  ) {
+    return null
+  }
+  const outSeconds = asset.durationSeconds === null
+    ? range.outSeconds
+    : Math.min(asset.durationSeconds, range.outSeconds)
+  if (outSeconds <= range.inSeconds) return null
+  return outSeconds === range.outSeconds
+    ? range
+    : { ...range, outSeconds }
 }
 
 function formatImportedFps(fps: number | null) {
@@ -1069,6 +1117,7 @@ function createOnlineVideoClip(
       resolveDocumentAssetUrl('./aurora/project-new-frontier.png'),
     duration: asset.duration,
     durationSeconds: null,
+    sourceDurationSeconds: null,
     resolution: asset.resolution,
     resolutionBadge: null,
     width: null,
@@ -1091,6 +1140,7 @@ function createOnlineVideoClip(
     tags: reference?.tags ?? [],
     annotated: reference?.annotated ?? false,
     note: reference?.note ?? asset.online.description,
+    trimRange: null,
     colorPreset: 'original',
     online: asset.online,
   }
@@ -1328,7 +1378,22 @@ function getCarouselOffsets(projectCount: number, realtimeMotion: boolean) {
 }
 
 function getStepReleaseOffsets(projectCount: number, stepDelta: number) {
-  return getCarouselOffsets(projectCount, stepDelta !== 0)
+  const offsets = getCarouselOffsets(projectCount, stepDelta !== 0)
+  if (Math.abs(stepDelta) <= 1) return offsets
+
+  const restingOffsets = getCarouselOffsets(projectCount, false)
+  const firstOffset = Math.min(
+    restingOffsets[0],
+    restingOffsets[0] + stepDelta,
+  )
+  const lastOffset = Math.max(
+    restingOffsets[restingOffsets.length - 1],
+    restingOffsets[restingOffsets.length - 1] + stepDelta,
+  )
+  return Array.from(
+    { length: lastOffset - firstOffset + 1 },
+    (_, index) => firstOffset + index,
+  )
 }
 
 function lerp(start: number, end: number, progress: number) {
@@ -1662,6 +1727,8 @@ function App() {
   const [lightweightPreviewByAsset, setLightweightPreviewByAsset] = useState<
     Record<string, LightweightPreviewState>
   >({})
+  const [mediaSourceAvailabilityByAsset, setMediaSourceAvailabilityByAsset] =
+    useState<Record<string, MediaSourceAvailabilityState>>({})
   const [clipMenuId, setClipMenuId] = useState<string | null>(null)
   const [clipAddDialogId, setClipAddDialogId] = useState<string | null>(null)
   const [externalVideoQueue, setExternalVideoQueue] = useState<
@@ -1823,6 +1890,10 @@ function App() {
   const [projectMenu, setProjectMenu] = useState<ProjectMenuState | null>(null)
   const [projectMenuDraftName, setProjectMenuDraftName] = useState('')
   const [projectMenuDraftSubtitle, setProjectMenuDraftSubtitle] = useState('')
+  const [projectManifestExportPendingId, setProjectManifestExportPendingId] =
+    useState<string | null>(null)
+  const [projectManifestExportStatus, setProjectManifestExportStatus] =
+    useState<{ projectId: string; message: string } | null>(null)
   const [projectDeleteDialogId, setProjectDeleteDialogId] = useState<
     string | null
   >(null)
@@ -1896,10 +1967,16 @@ function App() {
   const lightweightPreviewRequestsRef = useRef(
     new Map<string, Promise<boolean>>(),
   )
+  const mediaSourceAvailabilityRequestsRef = useRef(
+    new Map<string, Promise<boolean>>(),
+  )
+  const smartOrganizeAiOperationIdRef = useRef<string | null>(null)
   const clipActionNoticeTimerRef = useRef<number | undefined>(undefined)
   const detailPreviewVideoRef = useRef<HTMLVideoElement>(null)
   const detailColorPresetClickTimerRef = useRef<number | undefined>(undefined)
-  const openFrameRingRef = useRef<(clipId: string) => void>(() => undefined)
+  const openFrameRingRef = useRef<(clipId: string) => Promise<void>>(
+    async () => undefined,
+  )
   const backgroundObjectUrlsRef = useRef(new Set<string>())
   const particleObjectUrlsRef = useRef(new Set<string>())
   const particleImportVersionRef = useRef(0)
@@ -2795,6 +2872,39 @@ function App() {
     })
   }, [])
 
+  const checkMediaSourceAvailability = useCallback(async (
+    clip: Pick<VideoClip, 'assetId' | 'online' | 'sourcePath'>,
+  ) => {
+    if (clip.online) return true
+    const bridge = window.desktopBridge
+    if (!bridge?.isMediaFileAvailable) return true
+    if (!clip.sourcePath) return false
+
+    const requestKey = `${clip.assetId}\u0000${clip.sourcePath}`
+    const runningRequest = mediaSourceAvailabilityRequestsRef.current.get(
+      requestKey,
+    )
+    if (runningRequest) return runningRequest
+
+    const request = bridge.isMediaFileAvailable(clip.sourcePath)
+      .catch(() => false)
+      .then((available) => {
+        setMediaSourceAvailabilityByAsset((current) => ({
+          ...current,
+          [clip.assetId]: {
+            sourcePath: clip.sourcePath!,
+            available,
+          },
+        }))
+        return available
+      })
+      .finally(() => {
+        mediaSourceAvailabilityRequestsRef.current.delete(requestKey)
+      })
+    mediaSourceAvailabilityRequestsRef.current.set(requestKey, request)
+    return request
+  }, [])
+
   const ensureLightweightPreview = useCallback(async (
     clip: VideoClip,
     rebuild = false,
@@ -3229,7 +3339,8 @@ function App() {
       const excludedFrameIds = excludedFrameIdsBySource.get(
         `${asset.id}\u0000${asset.sourceFingerprint}`,
       )
-      const indexedFrames = (visualIndex?.frames ?? []).flatMap((frame) => {
+      const trimRange = resolveProjectTrimRange(reference, asset)
+      const allIndexedFrames = (visualIndex?.frames ?? []).flatMap((frame) => {
         if (excludedFrameIds?.has(frame.id)) return []
         const thumbnail = resolveLibraryMediaUrl(frame.imagePath)
         return thumbnail
@@ -3242,6 +3353,13 @@ function App() {
             }]
           : []
       })
+      const indexedFrames = trimRange
+        ? allIndexedFrames.filter(
+            (frame) =>
+              frame.timeSeconds >= trimRange.inSeconds &&
+              frame.timeSeconds < trimRange.outSeconds,
+          )
+        : allIndexedFrames
       const posterWasExcluded = Boolean(
         visualIndex?.frames.some(
           (frame) =>
@@ -3249,10 +3367,26 @@ function App() {
             excludedFrameIds?.has(frame.id),
         ),
       )
-      const visiblePosterPath = posterWasExcluded
+      const trimPosterCandidates = indexedFrames.length > 0
+        ? indexedFrames
+        : allIndexedFrames
+      const trimPosterPath = trimRange && trimPosterCandidates.length > 0
+        ? trimPosterCandidates.reduce((closest, candidate) =>
+            Math.abs(candidate.timeSeconds - trimRange.inSeconds) <
+            Math.abs(closest.timeSeconds - trimRange.inSeconds)
+              ? candidate
+              : closest,
+          ).imagePath
+        : null
+      const visiblePosterPath = trimPosterPath ?? (posterWasExcluded
         ? indexedFrames[Math.floor(indexedFrames.length / 2)]?.imagePath ?? null
-        : visualIndex?.posterPath ?? null
+        : visualIndex?.posterPath ?? null)
       const indexedPoster = resolveLibraryMediaUrl(visiblePosterPath)
+      const effectiveDurationSeconds = trimRange
+        ? trimRange.outSeconds - trimRange.inSeconds
+        : asset.durationSeconds
+      const sourceDurationSeconds =
+        asset.durationSeconds ?? trimRange?.outSeconds ?? null
       const effectiveSampleCount = asset.sourcePath
         ? indexedFrames.length
         : asset.sampleCount
@@ -3273,8 +3407,11 @@ function App() {
                * otherwise packaged CSS treats them as `dist/assets/aurora/...`.
                */
               : resolveLibraryMediaUrl(asset.thumbnail)),
-          duration: asset.duration,
-          durationSeconds: asset.durationSeconds,
+          duration: trimRange
+            ? formatImportedDuration(effectiveDurationSeconds)
+            : asset.duration,
+          durationSeconds: effectiveDurationSeconds,
+          sourceDurationSeconds,
           resolution: asset.resolution,
           resolutionBadge: getStandardResolutionBadge(
             asset.width,
@@ -3285,7 +3422,15 @@ function App() {
           height: asset.height,
           fps: asset.fps,
           fpsValue: asset.fpsValue,
-          frameCount: asset.frameCount,
+          frameCount:
+            trimRange &&
+            effectiveDurationSeconds !== null &&
+            asset.fpsValue
+              ? String(Math.max(
+                  1,
+                  Math.round(effectiveDurationSeconds * asset.fpsValue),
+                ))
+              : asset.frameCount,
           sampleCount: effectiveSampleCount,
           size:
             asset.sizeBytes !== null
@@ -3309,6 +3454,7 @@ function App() {
           tags: reference.tags,
           annotated: reference.annotated,
           note: reference.note,
+          trimRange,
           colorPreset: normalizeMediaColorPresetId(asset.colorPreset),
           online: asset.online,
         } satisfies VideoClip,
@@ -4014,6 +4160,21 @@ function App() {
       ((frameRingClip.indexedFrames?.length ?? 0) > 0 ||
         frameRingClip.sampleCount > 0),
   )
+  const storedFrameRingSourceAvailability = frameRingClip
+    ? mediaSourceAvailabilityByAsset[frameRingClip.assetId]
+    : undefined
+  const frameRingSourceAvailability =
+    !frameRingClip || frameRingClip.online || externalFrameRingClip
+      ? true
+      : !frameRingClip.sourcePath
+        ? false
+        : !window.desktopBridge?.isMediaFileAvailable
+          ? true
+          : storedFrameRingSourceAvailability?.sourcePath ===
+              frameRingClip.sourcePath
+            ? storedFrameRingSourceAvailability.available
+            : undefined
+  const frameRingSourceOffline = frameRingSourceAvailability === false
   const storedFrameRingPreviewState = frameRingClip
     ? previewPlaybackByAsset[frameRingClip.assetId]
     : undefined
@@ -4029,6 +4190,28 @@ function App() {
         : [],
     [externalFrameRingClip, frameRingClip, onlineFrameRingClip, videoClips],
   )
+  useEffect(() => {
+    if (
+      currentView !== 'frame-ring' ||
+      !frameRingClip ||
+      frameRingClip.online ||
+      externalFrameRingClip ||
+      !frameRingClip.sourcePath
+    ) {
+      return
+    }
+    const check = () => {
+      void checkMediaSourceAvailability(frameRingClip)
+    }
+    check()
+    window.addEventListener('focus', check)
+    return () => window.removeEventListener('focus', check)
+  }, [
+    checkMediaSourceAvailability,
+    currentView,
+    externalFrameRingClip,
+    frameRingClip,
+  ])
   useEffect(() => {
     if (
       currentView !== 'frame-ring' &&
@@ -4071,12 +4254,29 @@ function App() {
     storedDetailLightweightPreview?.sourcePath === detailClip.sourcePath
       ? storedDetailLightweightPreview
       : undefined
+  const storedDetailSourceAvailability = detailClip
+    ? mediaSourceAvailabilityByAsset[detailClip.assetId]
+    : undefined
+  const detailSourceAvailability = detailClip?.online
+    ? true
+    : !detailClip?.sourcePath
+      ? false
+      : !window.desktopBridge?.isMediaFileAvailable
+        ? true
+        : storedDetailSourceAvailability?.sourcePath === detailClip.sourcePath
+          ? storedDetailSourceAvailability.available
+          : undefined
+  const detailSourceOffline = detailSourceAvailability === false
   const detailPreviewSourceUrl =
-    detailClip && detailLightweightPreview?.status === 'ready'
+    detailSourceAvailability === true &&
+    detailClip &&
+    detailLightweightPreview?.status === 'ready'
       ? resolveLibraryMediaUrl(detailLightweightPreview.playbackPath)
       : null
+  const detailPreviewStartSeconds = detailClip?.trimRange?.inSeconds ?? 0
+  const detailPreviewEndSeconds = detailClip?.trimRange?.outSeconds ?? null
   const detailPreviewPlaybackKey = detailClip
-    ? `${detailClip.id}\u0000${detailPreviewSourceUrl ?? ''}`
+    ? `${detailClip.id}\u0000${detailPreviewSourceUrl ?? ''}\u0000${detailPreviewStartSeconds}\u0000${detailPreviewEndSeconds ?? 'end'}`
     : null
   const detailIndexProgress = detailClip
     ? indexProgressByAsset[detailClip.assetId]
@@ -4087,7 +4287,25 @@ function App() {
       currentView !== 'video-library' ||
       !detailClip ||
       detailClip.online ||
+      !detailClip.sourcePath
+    ) {
+      return
+    }
+    const check = () => {
+      void checkMediaSourceAvailability(detailClip)
+    }
+    check()
+    window.addEventListener('focus', check)
+    return () => window.removeEventListener('focus', check)
+  }, [checkMediaSourceAvailability, currentView, detailClip])
+
+  useEffect(() => {
+    if (
+      currentView !== 'video-library' ||
+      !detailClip ||
+      detailClip.online ||
       !detailClip.sourcePath ||
+      detailSourceAvailability !== true ||
       detailLightweightPreview?.status === 'preparing' ||
       detailLightweightPreview?.status === 'ready' ||
       detailLightweightPreview?.status === 'failed'
@@ -4098,6 +4316,7 @@ function App() {
   }, [
     currentView,
     detailClip,
+    detailSourceAvailability,
     detailLightweightPreview?.status,
     ensureLightweightPreview,
   ])
@@ -4107,7 +4326,13 @@ function App() {
     return () => {
       video?.pause()
     }
-  }, [currentView, detailClip?.id, detailPreviewSourceUrl])
+  }, [
+    currentView,
+    detailClip?.id,
+    detailPreviewEndSeconds,
+    detailPreviewSourceUrl,
+    detailPreviewStartSeconds,
+  ])
   useEffect(
     () => () => {
       if (detailColorPresetClickTimerRef.current !== undefined) {
@@ -4654,10 +4879,15 @@ function App() {
       )
       const clip = clipsById.get(candidate.clipId)
       if (!clipResult || !clip) return
+      const playbackStartSeconds = clip.trimRange?.inSeconds ?? 0
       const previewProgress = clip.durationSeconds && clip.durationSeconds > 0
         ? Math.min(
             100,
-            Math.max(0, candidate.timeSeconds / clip.durationSeconds * 100),
+            Math.max(
+              0,
+              (candidate.timeSeconds - playbackStartSeconds) /
+                clip.durationSeconds * 100,
+            ),
           )
         : 0
       results.set(candidate.resultId, {
@@ -4767,18 +4997,23 @@ function App() {
     if (releaseTimer.current !== undefined || dragRaf.current !== undefined) return
 
     const canCycle = projects.length > 1
-    const stepDelta = Math.sign(delta)
+    const normalizedDelta = Math.trunc(delta)
+    if (!normalizedDelta) return
+    const stepDelta = Math.sign(normalizedDelta)
+    const stepCount = canCycle
+      ? Math.min(Math.abs(normalizedDelta), projects.length - 1)
+      : 1
     const targetOffset = canCycle
       ? stepDelta > 0
-        ? -getProjectDragLimit(responsiveMetrics.layoutScale, -1)
-        : getProjectDragLimit(responsiveMetrics.layoutScale, 1)
+        ? -getProjectDragLimit(responsiveMetrics.layoutScale, -1) * stepCount
+        : getProjectDragLimit(responsiveMetrics.layoutScale, 1) * stepCount
       : -stepDelta * 46 * responsiveMetrics.layoutScale
-    const duration = canCycle ? 520 : 240
+    const duration = canCycle ? 520 + (stepCount - 1) * 140 : 240
 
     setIsDragging(false)
     setIsReleasing(true)
     setReleaseSource('step')
-    setReleaseStepDelta(stepDelta)
+    setReleaseStepDelta(normalizedDelta)
     setReleaseDuration(duration)
     pendingDragOffset.current = 0
     setDragOffset(0)
@@ -4791,7 +5026,7 @@ function App() {
 
         releaseTimer.current = window.setTimeout(() => {
           if (canCycle) {
-            moveProject(stepDelta)
+            moveProject(stepDelta * stepCount)
             setIsRecycling(true)
           }
           setIsReleasing(false)
@@ -5109,7 +5344,9 @@ function App() {
   ) {
     const frameIndex = resolveVideoClipHoverFrameIndex(
       progress,
-      clip.indexedFrames.map((frame) => frame.timeSeconds),
+      clip.indexedFrames.map(
+        (frame) => frame.timeSeconds - (clip.trimRange?.inSeconds ?? 0),
+      ),
       clip.durationSeconds,
     )
     if (frameIndex === null || session.lastFrameIndex === frameIndex) return
@@ -5166,12 +5403,23 @@ function App() {
         ? video.duration
         : null
     if (duration === null) return
-    const seekStep = 1 / 12
-    const targetTime = resolveVideoClipHoverSeekTime(
-      session.progress,
+    const playbackStartSeconds = Math.min(
       duration,
+      Math.max(0, session.playbackStartSeconds),
     )
-    if (targetTime === null) return
+    const playbackEndSeconds = Math.max(
+      playbackStartSeconds,
+      Math.min(duration, session.playbackEndSeconds ?? duration),
+    )
+    const playbackDurationSeconds = playbackEndSeconds - playbackStartSeconds
+    if (playbackDurationSeconds <= 0) return
+    const seekStep = 1 / 12
+    const relativeTargetTime = resolveVideoClipHoverSeekTime(
+      session.progress,
+      playbackDurationSeconds,
+    )
+    if (relativeTargetTime === null) return
+    const targetTime = playbackStartSeconds + relativeTargetTime
     if (Math.abs(video.currentTime - targetTime) < seekStep * 0.75) return
     try {
       video.currentTime = targetTime
@@ -5217,12 +5465,16 @@ function App() {
     }
 
     const nextMode = useIndexedFrames ? 'frames' : 'video'
+    const playbackStartSeconds = pending.clip.trimRange?.inSeconds ?? 0
+    const playbackEndSeconds = pending.clip.trimRange?.outSeconds ?? null
     let session = clipHoverScrubSessionRef.current
     if (
       !session ||
       session.clipId !== pending.clip.id ||
       session.mode !== nextMode ||
       session.image !== image ||
+      session.playbackStartSeconds !== playbackStartSeconds ||
+      session.playbackEndSeconds !== playbackEndSeconds ||
       (nextMode === 'video' && session.sourceUrl !== hoverSourceUrl)
     ) {
       clearClipHoverScrub()
@@ -5233,6 +5485,8 @@ function App() {
         hitTarget: pending.hitTarget,
         progress,
         sourceUrl: hoverSourceUrl,
+        playbackStartSeconds,
+        playbackEndSeconds,
         lastFrameIndex: -1,
         frameLoadVersion: 0,
       }
@@ -5246,6 +5500,8 @@ function App() {
           poster: pending.clip.thumbnail,
           target: image,
           lightweight: Boolean(lightweightSourceUrl),
+          playbackStartSeconds,
+          playbackEndSeconds,
         })
       }
     }
@@ -5950,7 +6206,7 @@ function App() {
         openProjectDetails(state.projectIndex)
       } else {
         const cardOffset = Number.isFinite(state.cardOffset) ? state.cardOffset : 0
-        const stepDelta = Math.sign(cardOffset)
+        const stepDelta = Math.trunc(cardOffset)
         if (stepDelta !== 0) animateProjectStep(stepDelta)
       }
       window.setTimeout(() => {
@@ -6222,20 +6478,24 @@ function App() {
     const glassLayer = clipGlassLayerRef.current
     if (!glassLayer) return
 
+    const preparingEmptyVideoProject =
+      currentView === 'gallery' &&
+      pageTransitionPhase === 'exiting' &&
+      projectClips.length === 0
     const cacheValid = videoGlassCacheSignatureRef.current === videoGlassGeometrySignature
     const geometryCacheValid =
       cacheValid &&
       videoGeometrySyncSignatureRef.current === videoGeometrySyncSignature
     glassLayer.dataset.geometrySourceRevision = videoGeometrySyncSignature
     glassLayer.dataset.geometryCacheValid = String(geometryCacheValid)
-    if (currentView !== 'video-library') {
+    if (currentView !== 'video-library' && !preparingEmptyVideoProject) {
       glassLayer.dataset.glassCacheValid = String(cacheValid)
       return
     }
-    if (pageTransitionPhase === 'exiting') return
+    if (currentView === 'video-library' && pageTransitionPhase === 'exiting') return
 
     glassLayer.dataset.glassCacheValid = String(cacheValid)
-    if (pageTransitionPhase !== 'idle') return
+    if (pageTransitionPhase !== 'idle' && !preparingEmptyVideoProject) return
     if (geometryCacheValid) {
       glassLayer.dataset.geometryReused = 'true'
       return
@@ -6243,7 +6503,11 @@ function App() {
 
     let frame: number | undefined
     let sampledFrames = 0
-    const maxFrames = isCameraDragging || isClipDragging || isClipReleasing ? 2 : 24
+    const maxFrames = preparingEmptyVideoProject
+      ? 1
+      : isCameraDragging || isClipDragging || isClipReleasing
+        ? 2
+        : 24
     videoGeometrySyncCountRef.current += 1
     glassLayer.dataset.geometryReused = 'false'
     glassLayer.dataset.geometrySyncCount = String(
@@ -6420,6 +6684,7 @@ function App() {
     isClipReleasing,
     openClipFilterMenu,
     pageTransitionPhase,
+    projectClips.length,
     selectedClipId,
     videoLibraryLayout.cardContentScale,
     videoGlassGeometrySignature,
@@ -7440,6 +7705,7 @@ function App() {
         thumbnail || resolveDocumentAssetUrl('./aurora/project-new-frontier.png'),
       duration: asset.duration,
       durationSeconds: asset.durationSeconds,
+      sourceDurationSeconds: asset.durationSeconds,
       resolution: asset.resolution,
       resolutionBadge: getStandardResolutionBadge(
         asset.width,
@@ -7471,6 +7737,7 @@ function App() {
       note:
         existingReference?.note ??
         EXTERNAL_CLIP_DEFAULT_NOTE,
+      trimRange: null,
       colorPreset: normalizeMediaColorPresetId(asset.colorPreset),
     }
     return { descriptor, asset, clip, sourceChanged }
@@ -8385,6 +8652,7 @@ function App() {
         : null
     const nextClip = retainedClip ?? firstClip
 
+    setVideoLibraryMounted(true)
     setActiveIndex(index)
     setSelectedProjectId(project.id)
     setSelectedClipId(nextClip?.id ?? null)
@@ -8474,7 +8742,7 @@ function App() {
     transitionToView(id)
   }
 
-  function goToProject(index: number) {
+  function goToProject(index: number, cardOffset: number) {
     if (suppressNextClick.current) {
       suppressNextClick.current = false
       return
@@ -8485,8 +8753,13 @@ function App() {
       return
     }
 
-    const forwardDistance = (index - activeIndex + projects.length) % projects.length
-    const stepDelta = forwardDistance <= projects.length / 2 ? 1 : -1
+    const forwardDistance =
+      (index - activeIndex + projects.length) % projects.length
+    const stepDelta = Number.isFinite(cardOffset) && cardOffset !== 0
+      ? Math.trunc(cardOffset)
+      : forwardDistance <= projects.length / 2
+        ? forwardDistance
+        : forwardDistance - projects.length
     animateProjectStep(stepDelta)
   }
 
@@ -8512,6 +8785,7 @@ function App() {
     setHoveredProjectCardKey(cardKey)
     setProjectMenuDraftName(project.title)
     setProjectMenuDraftSubtitle(project.subtitle)
+    setProjectManifestExportStatus(null)
     setProjectMenu({ projectId })
     setSettingsPanelOpen(false)
     setSearchOpen(false)
@@ -8539,6 +8813,63 @@ function App() {
     setProjectMenuDraftName('')
     setProjectMenuDraftSubtitle('')
     setHoveredProjectCardKey(null)
+  }
+
+  async function exportProjectEditManifest(projectId: string) {
+    const bridge = window.desktopBridge
+    const project = displayProjects.find((entry) => entry.id === projectId)
+    if (!bridge || !project) {
+      setProjectManifestExportStatus({
+        projectId,
+        message: '请在 Aurora 桌面程序中导出剪辑清单。',
+      })
+      return
+    }
+
+    const manifest = createProjectEditManifest({
+      project,
+      mediaAssets: mediaAssetsRef.current,
+      projectAssetRefs: projectAssetRefsRef.current,
+      visualIndexes: visualIndexesRef.current,
+      frameAnnotations: frameAnnotationsRef.current,
+      frameExclusions: frameExclusionsRef.current,
+    })
+    if (manifest.summary.localMediaCount === 0) {
+      setProjectManifestExportStatus({
+        projectId,
+        message: '当前项目没有可导出的本地素材。',
+      })
+      return
+    }
+
+    setProjectManifestExportPendingId(projectId)
+    setProjectManifestExportStatus({
+      projectId,
+      message: '正在生成剪辑清单…',
+    })
+    try {
+      const result = await bridge.exportProjectEditManifest({
+        defaultFilename: getProjectEditManifestDefaultFilename(project.title),
+        json: createProjectEditManifestJson(manifest),
+        markdown: createProjectEditManifestMarkdown(manifest),
+      })
+      setProjectManifestExportStatus({
+        projectId,
+        message: result
+          ? 'JSON 与 Markdown 剪辑清单已导出。'
+          : '已取消导出。',
+      })
+    } catch (error) {
+      setProjectManifestExportStatus({
+        projectId,
+        message:
+          error instanceof Error && error.message
+            ? `导出失败：${error.message}`
+            : '剪辑清单导出失败，请稍后重试。',
+      })
+    } finally {
+      setProjectManifestExportPendingId(null)
+    }
   }
 
   function openProjectDeleteConfirmation(projectId: string) {
@@ -9386,7 +9717,16 @@ function App() {
 
   async function toggleDetailPreviewPlayback(clip: VideoClip) {
     if (clip.online) {
-      openFrameRing(clip.id)
+      void openFrameRing(clip.id)
+      return
+    }
+    if (!(await checkMediaSourceAvailability(clip))) {
+      detailPreviewVideoRef.current?.pause()
+      setDetailPreviewPlayingKey(null)
+      showClipActionNotice(
+        '素材已离线，请重新连接存储设备或重新定位原文件。',
+        clip.projectId,
+      )
       return
     }
     const previewState = lightweightPreviewByAsset[clip.assetId]
@@ -9429,7 +9769,21 @@ function App() {
       return
     }
 
-    if (video.ended) video.currentTime = 0
+    const playbackStartSeconds = clip.trimRange?.inSeconds ?? 0
+    const playbackEndSeconds = Math.min(
+      Number.isFinite(video.duration) && video.duration > 0
+        ? video.duration
+        : clip.sourceDurationSeconds ?? clip.trimRange?.outSeconds ?? Infinity,
+      clip.trimRange?.outSeconds ?? Infinity,
+    )
+    const boundaryTolerance = 1 / Math.max(1, clip.fpsValue ?? 24)
+    if (
+      video.ended ||
+      video.currentTime < playbackStartSeconds ||
+      video.currentTime >= playbackEndSeconds - boundaryTolerance
+    ) {
+      video.currentTime = playbackStartSeconds
+    }
     try {
       await video.play()
     } catch {
@@ -9573,7 +9927,32 @@ function App() {
     }).sort((left, right) => left.timeSeconds - right.timeSeconds)
     if (candidates.length === 0) return null
 
+    const candidatesByFrameId = new Map(
+      candidates.map((candidate) => [candidate.frameId, candidate]),
+    )
+    const annotationEvidence = frameAnnotationsRef.current
+      .flatMap((annotation) => {
+        const candidate = candidatesByFrameId.get(annotation.frameId)
+        if (
+          annotation.assetId !== asset.id ||
+          !candidate ||
+          (!annotation.note.trim() && annotation.tags.length === 0)
+        ) {
+          return []
+        }
+        return [{
+          frameId: annotation.frameId,
+          timeSeconds: candidate.timeSeconds,
+          note: annotation.note.trim(),
+          tags: annotation.tags,
+          imagePath: candidate.imagePath,
+        } satisfies AiFrameSequenceAnnotation]
+      })
+      .sort((left, right) => left.timeSeconds - right.timeSeconds)
     const evidenceTier = candidates[0].analysisTier
+    const annotationRevision = annotationEvidence.map((annotation) =>
+      `${annotation.frameId}:${annotation.note}:${annotation.tags.join(',')}`,
+    ).join('|')
     return {
       clipId: reference.id,
       assetId: asset.id,
@@ -9582,10 +9961,11 @@ function App() {
       sourceFingerprint: asset.sourceFingerprint,
       evidenceRevision:
         evidenceTier === 'visual-index'
-          ? `visual-index:${visualIndex?.createdAt ?? ''}`
-          : `thumbnail:${asset.thumbnail ?? ''}`,
+          ? `visual-index:${visualIndex?.createdAt ?? ''}:${annotationRevision}`
+          : `thumbnail:${asset.thumbnail ?? ''}:${annotationRevision}`,
       evidenceTier,
       candidates,
+      frameAnnotations: annotationEvidence,
     }
   }
 
@@ -9614,6 +9994,43 @@ function App() {
     const target = captureClipAiMetadataTarget(clipId)
     if (!target) {
       throw new Error('当前素材还没有可用于识别的关键帧或本地缩略图')
+    }
+
+    if (
+      target.frameAnnotations.length > 0 &&
+      bridge.summarizeAiFrameSequence
+    ) {
+      const annotationFrames = selectClipAiRepresentativeFrames(
+        target.frameAnnotations,
+        16,
+      )
+      const response = await bridge.summarizeAiFrameSequence({
+        visionProfileId,
+        frames: annotationFrames,
+      })
+      if (!response.ok) throw new Error(response.error.message)
+      if (!clipAiMetadataTargetIsCurrent(target)) {
+        throw new Error('识别期间帧环备注已变化，请重新识别')
+      }
+      const suggestion = {
+        note: response.data.note,
+        tags: response.data.cameraMotion
+          ? mergeClipAiTags(
+              response.data.tags,
+              [response.data.cameraMotion.label],
+              CLIP_DETAIL_TAG_MAX_COUNT,
+            )
+          : response.data.tags.slice(0, CLIP_DETAIL_TAG_MAX_COUNT),
+      }
+      if (suggestion.tags.length === 0 && !suggestion.note) {
+        throw new Error('暂时没有识别出适合写入的标签或备注')
+      }
+      return {
+        target,
+        suggestion,
+        evidenceCount: annotationFrames.length,
+        newlyAnalyzedFrameCount: 0,
+      }
     }
 
     const candidates = selectClipAiRepresentativeFrames(
@@ -10297,24 +10714,35 @@ function App() {
     )
     if (requestedFrames.length === 0) return []
 
-    const response = await bridge.analyzeAiVisualFrames({
-      visionProfileId,
-      candidates: requestedFrames.map((frame) => ({
-        resultId: `frame-smart:${target.assetId}:${target.sourceFingerprint}:${frame.id}`,
-        assetId: target.assetId,
-        clipId: target.clipId,
-        projectId: target.projectId,
-        frameId: frame.id,
-        sourceFingerprint: target.sourceFingerprint,
-        imagePath: frame.imagePath,
-        timeSeconds: frame.timeSeconds,
-        filename: target.filename,
-        projectTitle: target.projectTitle,
-        tags: target.inheritedTags,
-        note: target.inheritedNote,
-        analysisTier: 'visual-index',
-      })),
-    })
+    const operationId = bridge.createMediaOperationId()
+    smartOrganizeAiOperationIdRef.current = operationId
+    let response: Awaited<ReturnType<typeof bridge.analyzeAiVisualFrames>>
+    try {
+      response = await bridge.analyzeAiVisualFrames({
+        operationId,
+        visionProfileId,
+        descriptionStyle: 'frame-note',
+        candidates: requestedFrames.map((frame) => ({
+          resultId: `frame-smart:${target.assetId}:${target.sourceFingerprint}:${frame.id}`,
+          assetId: target.assetId,
+          clipId: target.clipId,
+          projectId: target.projectId,
+          frameId: frame.id,
+          sourceFingerprint: target.sourceFingerprint,
+          imagePath: frame.imagePath,
+          timeSeconds: frame.timeSeconds,
+          filename: target.filename,
+          projectTitle: target.projectTitle,
+          tags: target.inheritedTags,
+          note: target.inheritedNote,
+          analysisTier: 'visual-index',
+        })),
+      })
+    } finally {
+      if (smartOrganizeAiOperationIdRef.current === operationId) {
+        smartOrganizeAiOperationIdRef.current = null
+      }
+    }
     if (!response.ok) throw new Error(response.error.message)
     if (!selectedFrameSmartTargetIsCurrent(target)) {
       throw new Error('理解画面期间素材已变化，请重新扫描')
@@ -10329,6 +10757,17 @@ function App() {
           })]
         : [],
     )
+  }
+
+  async function cancelSelectedFrameSmartOrganize() {
+    const operationId = smartOrganizeAiOperationIdRef.current
+    smartOrganizeAiOperationIdRef.current = null
+    if (!operationId) return
+    try {
+      await window.desktopBridge?.cancelAiVisualOperation(operationId)
+    } catch {
+      return
+    }
   }
 
   function applySelectedFrameSmartOrganize(
@@ -10537,7 +10976,7 @@ function App() {
 
   async function chooseFrameExportDirectory() {
     const directoryPath = await window.desktopBridge?.selectDirectory({
-      title: '选择 Aurora 单帧保存位置',
+      title: '选择 Aurora 导出保存位置',
       buttonLabel: '选择此文件夹',
     })
     if (!directoryPath) return null
@@ -10590,6 +11029,58 @@ function App() {
           error instanceof Error
             ? `单帧导出失败：${error.message}`
             : '单帧导出失败，请检查原视频和保存位置。',
+      }
+    }
+  }
+
+  async function exportFrameQuickClip(
+    request: FrameRingQuickClipExportRequest,
+  ): Promise<FrameRingExportResult> {
+    const bridge = window.desktopBridge
+    if (!bridge || !request.sourcePath) {
+      return {
+        ok: false,
+        message: '无法读取原视频，请在 Aurora 桌面程序中重新定位素材。',
+      }
+    }
+
+    let directoryPath = request.directoryPath
+    if (!directoryPath.startsWith('/') && !/^[a-z]:[\\/]/i.test(directoryPath)) {
+      const selectedDirectory = await bridge.selectDirectory({
+        title: '选择 Aurora 视频保存位置',
+        buttonLabel: '导出到此文件夹',
+      })
+      if (!selectedDirectory) {
+        return { ok: false, message: '已取消快速视频导出' }
+      }
+      directoryPath = selectedDirectory
+    }
+    const separator = directoryPath.includes('\\') ? '\\' : '/'
+    const destinationPath = `${directoryPath.replace(/[\\/]+$/, '')}${separator}${request.filename}`
+
+    try {
+      const result = await bridge.exportClip({
+        sourcePath: request.sourcePath,
+        destinationPath,
+        startSeconds: request.inSeconds,
+        endSeconds: request.outSeconds,
+        videoCodec: 'copy',
+        audioCodec: 'copy',
+      })
+      return {
+        ok: true,
+        outputPath: result.destinationPath,
+        message: `${
+          request.rangeKind === 'project-trim' ? '已保存区间' : '完整视频'
+        }快速导出完成 · ${request.filename}`,
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        message:
+          error instanceof Error
+            ? `快速视频导出失败：${error.message}`
+            : '快速视频导出失败，请检查原视频和保存位置。',
       }
     }
   }
@@ -10878,6 +11369,86 @@ function App() {
     }
   }
 
+  function commitProjectTrimRange(
+    reference: ProjectAssetRef,
+    trimRange: ProjectTrimRange | null,
+  ) {
+    const nextReferences = projectAssetRefsRef.current.map((entry) => {
+      if (entry.id !== reference.id) return entry
+      if (trimRange) return { ...entry, trimRange }
+      const nextEntry = { ...entry }
+      delete nextEntry.trimRange
+      return nextEntry
+    })
+    const nextProjects = projectsRef.current.map((project) =>
+      project.id === reference.projectId
+        ? { ...project, updatedAt: formatProjectTimestamp() }
+        : project,
+    )
+    projectAssetRefsRef.current = nextReferences
+    projectsRef.current = nextProjects
+    setProjectAssetRefs(nextReferences)
+    setProjects(nextProjects)
+  }
+
+  function saveFrameTrimRange(
+    referenceId: string,
+    request: FrameRingTrimRangeSaveRequest,
+  ): FrameRingTrimRangeSaveResult {
+    const reference = projectAssetRefsRef.current.find(
+      (entry) => entry.id === referenceId,
+    )
+    const asset = reference
+      ? mediaAssetsRef.current.find((entry) => entry.id === reference.assetId)
+      : null
+    if (!reference || !asset || asset.online || !asset.sourcePath) {
+      return { ok: false, message: '当前素材无法保存非破坏区间。' }
+    }
+    if (
+      !Number.isInteger(request.inFrame) ||
+      !Number.isInteger(request.outFrame) ||
+      request.inFrame < 0 ||
+      request.outFrame <= request.inFrame ||
+      !Number.isFinite(request.inSeconds) ||
+      !Number.isFinite(request.outSeconds) ||
+      request.inSeconds < 0 ||
+      request.outSeconds <= request.inSeconds ||
+      (asset.durationSeconds !== null &&
+        request.outSeconds > asset.durationSeconds + 0.05)
+    ) {
+      return { ok: false, message: '当前入点或出点无效。' }
+    }
+
+    const nextTrimRange: ProjectTrimRange = {
+      sourceFingerprint: asset.sourceFingerprint,
+      inFrame: request.inFrame,
+      outFrame: request.outFrame,
+      inSeconds: request.inSeconds,
+      outSeconds: request.outSeconds,
+      updatedAt: new Date().toISOString(),
+    }
+    commitProjectTrimRange(reference, nextTrimRange)
+
+    const fps = asset.fpsValue ?? parseFrameRingFps(asset.fps)
+    return {
+      ok: true,
+      message: `已保存裁剪范围 ${formatFrameRingTimecode(request.inSeconds, fps)} → ${formatFrameRingTimecode(request.outSeconds, fps)}`,
+    }
+  }
+
+  function resetFrameTrimRange(
+    referenceId: string,
+  ): FrameRingTrimRangeSaveResult {
+    const reference = projectAssetRefsRef.current.find(
+      (entry) => entry.id === referenceId,
+    )
+    if (!reference?.trimRange) {
+      return { ok: false, message: '当前素材尚未裁剪。' }
+    }
+    commitProjectTrimRange(reference, null)
+    return { ok: true, message: '已恢复完整素材。' }
+  }
+
   function handleClipSelect(clipId: string) {
     if (suppressNextClipClick.current) {
       suppressNextClipClick.current = false
@@ -10887,7 +11458,7 @@ function App() {
     setSelectedClipId(clipId)
   }
 
-  function openFrameRing(clipId: string) {
+  async function openFrameRing(clipId: string) {
     if (pageTransitionActiveRef.current) return
     const clip = videoClips.find((entry) => entry.id === clipId)
     if (!clip) return
@@ -10909,6 +11480,21 @@ function App() {
       setActiveNav('project-details')
       transitionToView('frame-ring')
       setSearchOpen(false)
+      return
+    }
+    const sourceAvailable = await checkMediaSourceAvailability(clip)
+    if (pageTransitionActiveRef.current) return
+    if (
+      !sourceAvailable &&
+      !canOpenUnavailableFrameRingSource(
+        clip.indexedFrames.length,
+        clip.sampleCount,
+      )
+    ) {
+      showClipActionNotice(
+        '素材已离线，请重新连接存储设备或重新定位原文件。',
+        clip.projectId,
+      )
       return
     }
     setOnlineFrameRingAsset(null)
@@ -10952,7 +11538,7 @@ function App() {
       setSearchOpen(false)
       return
     }
-    openFrameRingRef.current(clipId)
+    void openFrameRingRef.current(clipId)
   }, [
     externalVideoAddCandidate,
     externalVideoNavigationClipId,
@@ -10986,10 +11572,10 @@ function App() {
   function openSelectedFrameRing() {
     if (pageTransitionActiveRef.current) return
     if (!detailClip) return
-    openFrameRing(detailClip.id)
+    void openFrameRing(detailClip.id)
   }
 
-  function openDiscoveryLocalFrameRing(
+  async function openDiscoveryLocalFrameRing(
     result: DiscoveryFootageResult,
     intent: FrameRingEntryIntent = 'preview',
   ) {
@@ -11009,6 +11595,21 @@ function App() {
       !clip ||
       pageTransitionActiveRef.current
     ) {
+      return false
+    }
+    const sourceAvailable = await checkMediaSourceAvailability(clip)
+    if (pageTransitionActiveRef.current) return false
+    if (
+      !sourceAvailable &&
+      !canOpenUnavailableFrameRingSource(
+        clip.indexedFrames.length,
+        clip.sampleCount,
+      )
+    ) {
+      showClipActionNotice(
+        '素材已离线，请重新连接存储设备或重新定位原文件。',
+        clip.projectId,
+      )
       return false
     }
 
@@ -12317,7 +12918,7 @@ function App() {
                     current === cardKey ? null : current,
                   )
                 }
-                onClick={() => goToProject(index)}
+                onClick={() => goToProject(index, offset)}
               />
               <button
                 className="projectMenuHitTarget"
@@ -12687,7 +13288,7 @@ function App() {
             {clipHoverScrubVideoPortal?.target.isConnected &&
               createPortal(
                 <video
-                  key={`${clipHoverScrubVideoPortal.clipId}:${clipHoverScrubVideoPortal.sourceUrl}`}
+                  key={`${clipHoverScrubVideoPortal.clipId}:${clipHoverScrubVideoPortal.sourceUrl}:${clipHoverScrubVideoPortal.playbackStartSeconds}:${clipHoverScrubVideoPortal.playbackEndSeconds ?? 'end'}`}
                   ref={clipHoverScrubVideoRef}
                   className="videoClipHoverScrubVideo"
                   data-clip-id={clipHoverScrubVideoPortal.clipId}
@@ -12770,7 +13371,8 @@ function App() {
                         )
                       }}
                       onClick={() => handleClipSelect(clip.id)}
-                      onDoubleClick={() => openFrameRing(clip.id)}
+                      onDoubleClick={() => void openFrameRing(clip.id)}
+                      onContextMenu={(event) => openClipMenu(event, clip.id)}
                     />,
                     <button
                       key={`menu-hit:${clip.id}`}
@@ -12785,6 +13387,7 @@ function App() {
                         event.stopPropagation()
                       }}
                       onClick={(event) => openClipMenu(event, clip.id)}
+                      onContextMenu={(event) => openClipMenu(event, clip.id)}
                     />,
                   ]
                 }),
@@ -12963,13 +13566,50 @@ function App() {
                       detailPreviewFailedSource !== detailPreviewSourceUrl && (
                         <>
                           <video
-                            key={`${detailClip.id}:${detailPreviewSourceUrl}`}
+                            key={`${detailClip.id}:${detailPreviewSourceUrl}:${detailPreviewStartSeconds}:${detailPreviewEndSeconds ?? 'end'}`}
                             ref={detailPreviewVideoRef}
                             className="detailPreviewVideo"
                             src={detailPreviewSourceUrl}
                             poster={detailClip.thumbnail}
                             preload="auto"
                             playsInline
+                            onLoadedMetadata={(event) => {
+                              const video = event.currentTarget
+                              const playbackEndSeconds = Math.min(
+                                video.duration,
+                                detailPreviewEndSeconds ?? video.duration,
+                              )
+                              if (
+                                video.currentTime < detailPreviewStartSeconds ||
+                                video.currentTime >= playbackEndSeconds
+                              ) {
+                                video.currentTime = detailPreviewStartSeconds
+                              }
+                            }}
+                            onTimeUpdate={(event) => {
+                              if (detailPreviewEndSeconds === null) return
+                              const video = event.currentTarget
+                              const boundaryTolerance = 1 / Math.max(
+                                1,
+                                detailClip.fpsValue ?? 24,
+                              )
+                              if (
+                                video.currentTime <
+                                detailPreviewEndSeconds - boundaryTolerance
+                              ) {
+                                return
+                              }
+                              video.pause()
+                              video.currentTime = Math.min(
+                                video.duration,
+                                detailPreviewEndSeconds,
+                              )
+                              setDetailPreviewPlayingKey((current) =>
+                                current === detailPreviewPlaybackKey
+                                  ? null
+                                  : current,
+                              )
+                            }}
                             onPlay={() =>
                               setDetailPreviewPlayingKey(
                                 detailPreviewPlaybackKey,
@@ -13002,6 +13642,12 @@ function App() {
                           />
                         </>
                       )}
+                    {detailSourceOffline && (
+                      <span className="detailPreviewOffline" role="status">
+                        <VideoOff strokeWidth={1.35} />
+                        <strong>素材已离线</strong>
+                      </span>
+                    )}
                     {!detailClip.online && (
                       <button
                         className={`detailPreviewColorPresetButton ${
@@ -13030,6 +13676,7 @@ function App() {
                       className="detailPreviewPlayButton"
                       type="button"
                       data-camera-gesture="block"
+                      disabled={detailSourceOffline}
                       aria-label={
                         detailClip.online
                           ? `在${getOnlineProviderLabel(detailClip.online.provider)}官方页面播放`
@@ -13318,6 +13965,24 @@ function App() {
           }
           onExportStill={onlineFrameRingClip ? undefined : exportFrameStill}
           onExportClip={onlineFrameRingClip ? undefined : exportFrameClip}
+          onQuickExportClip={
+            onlineFrameRingClip ? undefined : exportFrameQuickClip
+          }
+          savedTrimRange={
+            externalFrameRingClip || onlineFrameRingClip
+              ? null
+              : frameRingClip.trimRange
+          }
+          onSaveTrimRange={
+            externalFrameRingClip || onlineFrameRingClip
+              ? undefined
+              : (request) => saveFrameTrimRange(frameRingClip.id, request)
+          }
+          onResetTrimRange={
+            externalFrameRingClip || onlineFrameRingClip
+              ? undefined
+              : () => resetFrameTrimRange(frameRingClip.id)
+          }
           onRevealSource={
             onlineFrameRingClip ? undefined : revealSelectedFrameSource
           }
@@ -13336,6 +14001,7 @@ function App() {
               ? undefined
               : analyzeSelectedFramesForSmartOrganize
           }
+          onCancelSmartOrganize={cancelSelectedFrameSmartOrganize}
           onApplySmartOrganize={
             externalFrameRingClip || onlineFrameRingClip
               ? undefined
@@ -13348,6 +14014,7 @@ function App() {
           }
           indexTask={frameRingClip.indexTask}
           indexProgress={indexProgressByAsset[frameRingClip.assetId]}
+          sourceOffline={frameRingSourceOffline}
           onBuildFrameRing={
             externalFrameRingClip || onlineFrameRingClip
               ? undefined
@@ -13604,7 +14271,30 @@ function App() {
                     <small>自动等比居中裁剪为 4:3</small>
                   </span>
                 </button>
+                {menuProject.kind !== '3d' && (
+                  <button
+                    className="projectSettingsAction projectSettingsManifestAction uiGlassInset uiGlassInteractive"
+                    type="button"
+                    disabled={projectManifestExportPendingId === menuProject.id}
+                    onClick={() => void exportProjectEditManifest(menuProject.id)}
+                  >
+                    <FileText size={17} strokeWidth={1.5} aria-hidden="true" />
+                    <span>
+                      <strong>
+                        {projectManifestExportPendingId === menuProject.id
+                          ? '正在生成剪辑清单…'
+                          : '导出剪辑清单'}
+                      </strong>
+                      <small>保存项目裁剪范围、视觉帧备注与源文件信息</small>
+                    </span>
+                  </button>
+                )}
               </div>
+              {projectManifestExportStatus?.projectId === menuProject.id && (
+                <p className="projectSettingsManifestStatus" aria-live="polite">
+                  {projectManifestExportStatus.message}
+                </p>
+              )}
               <div className="projectSettingsCoverStatus">
                 <span title={menuProjectCoverName ?? undefined}>
                   {menuProjectCoverName ??
@@ -13795,25 +14485,6 @@ function App() {
                     {clipMenu.online
                       ? '使用官方页面与当前登录权益播放'
                       : '定位原始视频文件'}
-                  </small>
-                </span>
-                <ChevronRight size={14} strokeWidth={1.45} />
-              </button>
-              <button
-                className="uiGlassInset uiGlassInteractive destructive"
-                type="button"
-                onClick={() => {
-                  setClipMenuId(null)
-                  setClipRemoveDialogId(clipMenu.id)
-                }}
-              >
-                <Trash2 size={17} strokeWidth={1.45} />
-                <span>
-                  <strong>从当前项目移除…</strong>
-                  <small>
-                    {clipMenu.online
-                      ? `不会取消收藏或影响${getOnlineProviderLabel(clipMenu.online.provider)}原视频`
-                      : '不会删除磁盘原文件或视觉索引'}
                   </small>
                 </span>
                 <ChevronRight size={14} strokeWidth={1.45} />

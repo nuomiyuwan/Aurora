@@ -9,6 +9,7 @@ import {
   type OnlineMediaDescriptor,
   type MediaVisualIndex,
   type MediaVisualIndexFrame,
+  type ProjectTrimRange,
   type ProjectAssetRef,
 } from './mediaLibraryTypes'
 import {
@@ -31,7 +32,7 @@ import { isOnlineMediaProvider } from './onlineProviderRegistry'
 import type { Project } from './projects'
 import { normalizeMediaColorPresetId } from './mediaColorPresets'
 
-export const LIBRARY_SCHEMA_VERSION = 5
+export const LIBRARY_SCHEMA_VERSION = 7
 
 export type PersistedProjectCover = {
   name: string
@@ -537,7 +538,7 @@ function parseOnlineMediaDescriptor(
 
 function parseMediaAsset(
   value: unknown,
-  fromSchemaVersion: 1 | 2 | 3 | 4 | 5,
+  fromSchemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7,
 ): MediaAsset | null {
   if (!isRecord(value)) return null
   const id = readString(value.id)
@@ -859,6 +860,42 @@ function parseFrameExclusion(
   }
 }
 
+function parseProjectTrimRange(
+  value: unknown,
+): ProjectTrimRange | null {
+  if (!isRecord(value)) return null
+  const sourceFingerprint = readString(value.sourceFingerprint)
+  const inFrame = readFiniteNumber(value.inFrame)
+  const outFrame = readFiniteNumber(value.outFrame)
+  const inSeconds = readFiniteNumber(value.inSeconds)
+  const outSeconds = readFiniteNumber(value.outSeconds)
+  const updatedAt = readString(value.updatedAt)
+  if (
+    !sourceFingerprint ||
+    inFrame === null ||
+    outFrame === null ||
+    !Number.isInteger(inFrame) ||
+    !Number.isInteger(outFrame) ||
+    inFrame < 0 ||
+    outFrame <= inFrame ||
+    inSeconds === null ||
+    outSeconds === null ||
+    inSeconds < 0 ||
+    outSeconds <= inSeconds ||
+    !updatedAt
+  ) {
+    return null
+  }
+  return {
+    sourceFingerprint,
+    inFrame,
+    outFrame,
+    inSeconds,
+    outSeconds,
+    updatedAt,
+  }
+}
+
 function parseProjectAssetRef(value: unknown): ProjectAssetRef | null {
   if (!isRecord(value)) return null
   const id = readString(value.id)
@@ -871,6 +908,21 @@ function parseProjectAssetRef(value: unknown): ProjectAssetRef | null {
     : null
   const annotated = readBoolean(value.annotated)
   const note = readString(value.note)
+  const trimRange = value.trimRange === undefined
+    ? null
+    : parseProjectTrimRange(value.trimRange)
+  const legacyTrimRanges = value.clipSelections === undefined
+    ? []
+    : Array.isArray(value.clipSelections)
+      ? value.clipSelections
+          .map(parseProjectTrimRange)
+          .filter(
+            (range): range is ProjectTrimRange => range !== null,
+          )
+          .sort((left, right) =>
+            right.updatedAt.localeCompare(left.updatedAt),
+          )
+      : null
 
   if (
     !id ||
@@ -880,10 +932,14 @@ function parseProjectAssetRef(value: unknown): ProjectAssetRef | null {
     thumbnailFollowsProject === null ||
     tags === null ||
     annotated === null ||
-    note === null
+    note === null ||
+    (value.trimRange !== undefined && trimRange === null) ||
+    legacyTrimRanges === null
   ) {
     return null
   }
+
+  const effectiveTrimRange = trimRange ?? legacyTrimRanges[0] ?? null
 
   return {
     id,
@@ -894,6 +950,7 @@ function parseProjectAssetRef(value: unknown): ProjectAssetRef | null {
     tags,
     annotated,
     note,
+    ...(effectiveTrimRange ? { trimRange: effectiveTrimRange } : {}),
   }
 }
 
@@ -1016,6 +1073,8 @@ export function parsePersistentLibrary(
       sourceSchemaVersion !== 2 &&
       sourceSchemaVersion !== 3 &&
       sourceSchemaVersion !== 4 &&
+      sourceSchemaVersion !== 5 &&
+      sourceSchemaVersion !== 6 &&
       sourceSchemaVersion !== LIBRARY_SCHEMA_VERSION) ||
     !Array.isArray(library.projects) ||
     !Array.isArray(library.mediaAssets) ||
@@ -1024,12 +1083,13 @@ export function parsePersistentLibrary(
       sourceSchemaVersion >= 2 &&
       (!Array.isArray(library.visualIndexes) ||
         !Array.isArray(library.frameAnnotations))) ||
-    (sourceSchemaVersion === LIBRARY_SCHEMA_VERSION &&
+    (typeof sourceSchemaVersion === 'number' &&
+      sourceSchemaVersion >= 5 &&
       !Array.isArray(library.frameExclusions))
   ) {
     return null
   }
-  const parsedSchemaVersion = sourceSchemaVersion as 1 | 2 | 3 | 4 | 5
+  const parsedSchemaVersion = sourceSchemaVersion as 1 | 2 | 3 | 4 | 5 | 6 | 7
 
   const projects = library.projects
     .map(parseProject)

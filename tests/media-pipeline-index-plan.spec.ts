@@ -37,7 +37,15 @@ const { __test } = require('../electron/mediaPipeline.cjs') as {
     createBalancedSceneSelectionExpression: (
       candidates: SceneCandidate[],
     ) => string
+    createHardwareDecodeInputArgs: (
+      metadata: { codec?: string },
+      platform?: NodeJS.Platform,
+    ) => string[]
     createIndexScaleFilter: () => string
+    createUniformIndexFilterArgs: (
+      uniformFilter: string,
+      shouldDetectScenes: boolean,
+    ) => string[]
     createSceneChangeParser: () => {
       append: (chunk: string) => void
       finish: () => SceneCandidate[]
@@ -79,6 +87,40 @@ test('caps the longest thumbnail edge at 640 and uses moderate JPEG quality', ()
   expect(__test.createIndexScaleFilter()).toBe(
     "scale='min(640,iw)':'min(640,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
   )
+})
+
+test('uses VideoToolbox decoding only for supported macOS camera codecs', () => {
+  expect(
+    __test.createHardwareDecodeInputArgs({ codec: 'hevc' }, 'darwin'),
+  ).toEqual(['-hwaccel', 'videotoolbox'])
+  expect(
+    __test.createHardwareDecodeInputArgs({ codec: 'h264' }, 'darwin'),
+  ).toEqual(['-hwaccel', 'videotoolbox'])
+  expect(
+    __test.createHardwareDecodeInputArgs({ codec: 'prores' }, 'darwin'),
+  ).toEqual([])
+  expect(
+    __test.createHardwareDecodeInputArgs({ codec: 'hevc' }, 'win32'),
+  ).toEqual([])
+})
+
+test('keeps scene analysis inside the filter graph so progress follows the uniform output', () => {
+  const uniformFilter = 'fps=1,scale=640:360'
+  const args = __test.createUniformIndexFilterArgs(uniformFilter, true)
+  const graph = args[1]
+
+  expect(args).toEqual([
+    '-filter_complex',
+    graph,
+    '-map',
+    '[uniform_output]',
+  ])
+  expect(graph).toContain(`[uniform_input]${uniformFilter}[uniform_output]`)
+  expect(graph).toContain('showinfo,nullsink')
+  expect(args).not.toContain('-f')
+  expect(
+    __test.createUniformIndexFilterArgs(uniformFilter, false),
+  ).toEqual(['-map', '0:v:0', '-vf', uniformFilter])
 })
 
 test('parses scene changes across stderr chunks without losing the last row', () => {

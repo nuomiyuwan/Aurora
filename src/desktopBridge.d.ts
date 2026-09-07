@@ -197,8 +197,10 @@ declare global {
 
   interface AiVisualFrameAnalysisRequest {
     candidates: AiVisualFrameCandidate[]
+    operationId?: string
     profileId?: string | null
     visionProfileId?: string | null
+    descriptionStyle?: 'search-index' | 'frame-note'
   }
 
   interface AiVisualFrameAnalysis {
@@ -216,6 +218,30 @@ declare global {
     frames: AiVisualFrameAnalysis[]
     analyzedFrameCount: number
     newlyAnalyzedFrameCount: number
+  }
+
+  interface AiFrameSequenceAnnotation {
+    frameId: string
+    timeSeconds: number
+    note: string
+    tags: string[]
+    imagePath?: string
+  }
+
+  interface AiFrameSequenceSummaryRequest {
+    frames: AiFrameSequenceAnnotation[]
+    profileId?: string | null
+    visionProfileId?: string | null
+  }
+
+  interface AiFrameSequenceSummaryResponse {
+    note: string
+    tags: string[]
+    cameraMotion: {
+      type: string
+      label: string
+      confidence: number
+    } | null
   }
 
   type EmbyErrorCode =
@@ -420,8 +446,20 @@ declare global {
     filters?: NativeDialogFilter[]
   }
 
+  interface ProjectEditManifestExportRequest {
+    defaultFilename: string
+    json: string
+    markdown: string
+  }
+
+  interface ProjectEditManifestExportResult {
+    jsonPath: string
+    markdownPath: string
+  }
+
   type MediaOperationKind =
     | 'media-thumbnail'
+    | 'timeline-thumbnail'
     | 'preview-proxy'
     | 'lightweight-preview-proxy'
     | 'visual-index'
@@ -476,6 +514,27 @@ declare global {
   interface MediaThumbnailResult {
     assetId: string
     sourcePath: string
+    thumbnailPath: string
+    sizeBytes: number
+    modifiedAt: string
+    cached: boolean
+    createdAt: string
+  }
+
+  interface MediaTimelineThumbnailRequest {
+    assetId: string
+    sourcePath: string
+    timeSeconds: number
+    rebuild?: boolean
+    operationId?: string
+  }
+
+  interface MediaTimelineThumbnailResult {
+    operationId: string
+    assetId: string
+    sourcePath: string
+    sourceRevision: string
+    timeSeconds: number
     thumbnailPath: string
     sizeBytes: number
     modifiedAt: string
@@ -944,9 +1003,13 @@ declare global {
     revealProjectFile(filePath: string): Promise<boolean>
     getPathForFile(file: File): string | null
     inspectMediaFile(filePath: string): Promise<MediaFileMetadata>
+    isMediaFileAvailable(filePath: string): Promise<boolean>
     createMediaThumbnail(
       request: MediaThumbnailRequest,
     ): Promise<MediaThumbnailResult>
+    ensureTimelineThumbnail(
+      request: MediaTimelineThumbnailRequest,
+    ): Promise<MediaTimelineThumbnailResult>
     removeMediaAssetData(assetId: string): Promise<MediaAssetDataRemovalResult>
     inspectAppCache(retainedAssetIds: string[]): Promise<AppCacheReport>
     cleanAppCache(retainedAssetIds: string[]): Promise<AppCacheCleanupResult>
@@ -979,6 +1042,9 @@ declare global {
       options?: NativeDirectoryDialogOptions,
     ): Promise<string | null>
     selectSavePath(options?: NativeSaveDialogOptions): Promise<string | null>
+    exportProjectEditManifest(
+      request: ProjectEditManifestExportRequest,
+    ): Promise<ProjectEditManifestExportResult | null>
     createMediaOperationId(): string
     getMediaUrl(filePath: string): string | null
     ensureMediaPreview(
@@ -1100,6 +1166,12 @@ declare global {
     analyzeAiVisualFrames(
       request: AiVisualFrameAnalysisRequest,
     ): Promise<AiVisualSearchResult<AiVisualFrameAnalysisResponse>>
+    cancelAiVisualOperation(
+      operationId: string,
+    ): Promise<AiVisualSearchResult<boolean>>
+    summarizeAiFrameSequence(
+      request: AiFrameSequenceSummaryRequest,
+    ): Promise<AiVisualSearchResult<AiFrameSequenceSummaryResponse>>
     getEmbyConnection(): Promise<EmbyResult<EmbyConnectionState>>
     testEmbyConnection(
       request: EmbyConnectionRequest,

@@ -57,9 +57,25 @@ const normalizeTag = (value: string) => value.trim().replace(/^#+/, '')
 const splitDescription = (description: string) => {
   const normalized = description.trim().replace(/\s+/g, ' ')
   if (!normalized) return ''
-  const firstClause = normalized.split(/[。！？；\n]/u)[0]?.trim() ?? ''
-  if (firstClause.length <= 20) return firstClause
-  return `${Array.from(firstClause).slice(0, 19).join('')}…`
+  const firstSentence = normalized.split(/[。！？；\n]/u)[0]?.trim() ?? ''
+  if (Array.from(firstSentence).length <= 20) return firstSentence
+
+  const clauses = firstSentence
+    .split(/[，,：:]/u)
+    .map((clause) => clause.trim())
+    .filter(Boolean)
+  let concise = ''
+  for (const clause of clauses) {
+    const candidate = concise ? `${concise}，${clause}` : clause
+    if (Array.from(candidate).length > 20) break
+    concise = candidate
+  }
+  if (concise) return concise
+
+  return Array.from(firstSentence)
+    .slice(0, 20)
+    .join('')
+    .replace(/[，,：:、；;\s]+$/u, '')
 }
 
 export function createFrameRingAnnotationSuggestion(

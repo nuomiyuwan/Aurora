@@ -3418,6 +3418,40 @@ input:focus-visible {
   padding: 0;
 }
 
+.detailPreviewPlayButton:disabled {
+  cursor: default;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.detailPreviewOffline {
+  position: absolute;
+  z-index: 5;
+  inset: 0;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: calc(7px * var(--detail-panel-scale));
+  background: rgba(4, 7, 12, 0.34);
+  color: rgba(221, 231, 246, 0.72);
+  pointer-events: none;
+}
+
+.detailPreviewOffline svg {
+  width: calc(22px * var(--detail-panel-scale));
+  height: calc(22px * var(--detail-panel-scale));
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.detailPreviewOffline strong {
+  font-size: calc(10px * var(--detail-panel-scale));
+  font-weight: 500;
+  letter-spacing: 0.06em;
+}
+
 .detailPreviewColorPresetButton {
   position: absolute;
   z-index: 4;
@@ -3861,6 +3895,22 @@ input:focus-visible {
 .projectSettingsAction:hover {
   border-color: rgba(194, 205, 225, 0.18);
   color: rgba(241, 244, 249, 0.88);
+}
+
+.projectSettingsAction:disabled {
+  cursor: default;
+  opacity: 0.52;
+}
+
+.projectSettingsManifestAction {
+  grid-column: 1 / -1;
+}
+
+.projectSettingsManifestStatus {
+  margin: 0;
+  color: rgba(185, 207, 241, 0.52);
+  font-size: 10px;
+  line-height: 1.4;
 }
 
 .projectSettingsPanel .createPanelMeta span:last-child {
@@ -4667,6 +4717,37 @@ input:focus-visible {
 .frameRingStillExportPanel {
   width: 520px;
   gap: 16px;
+}
+
+.frameRingQuickExportKinds {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 4px;
+  border: 1px solid rgba(205, 218, 239, 0.12);
+  border-radius: 11px;
+  padding: 4px;
+  background: rgba(7, 12, 20, 0.22);
+}
+
+.frameRingQuickExportKinds button {
+  height: 34px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(210, 218, 231, 0.56);
+  font: inherit;
+  font-size: 11px;
+}
+
+.frameRingQuickExportKinds button:hover {
+  color: rgba(234, 240, 250, 0.84);
+}
+
+.frameRingQuickExportKinds button.active {
+  border-color: rgba(188, 210, 244, 0.22);
+  background: rgba(151, 187, 239, 0.12);
+  color: rgba(235, 242, 253, 0.92);
 }
 
 .frameRingStillExportInput input {
@@ -6233,10 +6314,8 @@ input:focus-visible {
   opacity: 0.001 !important;
 }
 
-.frameRingProjectedGlassLayer[data-frame-ring-ready='false'] :is(
-  .frameRingProjectedGlass,
-  .frameRingActionProjectedGlass
-) {
+.frameRingProjectedGlass[data-projected-glass-visible='false'],
+.frameRingActionProjectedGlass[data-projected-glass-visible='false'] {
   opacity: 0.001 !important;
 }
 
@@ -6624,6 +6703,35 @@ input:focus-visible {
   height: 80.740741%;
   background: linear-gradient(180deg, rgba(3, 6, 10, 0.02), transparent 55%, rgba(3, 6, 10, 0.22));
   pointer-events: none;
+}
+
+.frameRingPreviewOffline {
+  position: absolute;
+  z-index: 3;
+  top: 9.537037%;
+  left: 5.150463%;
+  display: grid;
+  width: 89.583333%;
+  height: 80.740741%;
+  align-content: center;
+  justify-items: center;
+  gap: calc(7px * var(--frame-ring-ui-scale));
+  background: rgba(3, 6, 10, 0.4);
+  color: rgba(221, 232, 248, 0.72);
+  pointer-events: none;
+  text-align: center;
+}
+
+.frameRingPreviewOffline strong {
+  font-size: calc(14px * var(--frame-ring-ui-scale));
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+
+.frameRingPreviewOffline small {
+  color: rgba(210, 220, 236, 0.44);
+  font-size: calc(9px * var(--frame-ring-ui-scale));
+  letter-spacing: 0.03em;
 }
 
 .frameRingPreviewImage,
@@ -7346,6 +7454,36 @@ input:focus-visible {
   font-size: calc(10px * var(--frame-ring-ui-scale));
 }
 
+.frameRingExportActions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: calc(6px * var(--frame-ring-ui-scale));
+}
+
+.frameRingExportActions[data-has-save-action='true'] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.frameRingInfoPanel .frameRingTrimResetButton {
+  display: inline-flex;
+  width: auto;
+  height: calc(18px * var(--frame-ring-ui-scale));
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  justify-self: center;
+  gap: calc(4px * var(--frame-ring-ui-scale));
+  border: 0;
+  background: transparent;
+  color: rgba(198, 211, 231, 0.46);
+  font-size: calc(7.5px * var(--frame-ring-ui-scale));
+  white-space: nowrap;
+}
+
+.frameRingInfoPanel .frameRingTrimResetButton:hover {
+  color: rgba(226, 236, 251, 0.82);
+}
+
 .frameRingInfoPanel .frameRingExportButton:hover {
   border-color: rgba(184, 213, 255, 0.72);
   color: rgba(236, 243, 255, 0.96);
@@ -7680,6 +7818,14 @@ input:focus-visible {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.frameRingBottomActions.isUnindexedLocalActions {
+  width: min(
+    calc(430px * var(--frame-ring-layout-scale)),
+    calc(100vw - 180px * var(--frame-ring-layout-scale))
+  );
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 /*
  * Keep the 2D backdrop surface mounted directly under .auroraApp so the page
  * opacity transition cannot create a temporary Backdrop Root around it. The
@@ -7903,14 +8049,19 @@ input:focus-visible {
 .frameRingTrimThumbnails {
   position: absolute;
   inset: 0;
-  display: grid;
   border-radius: inherit;
   overflow: hidden;
 }
 
-.frameRingTrimThumbnails img {
-  width: 100%;
+.frameRingTrimThumbnails img,
+.frameRingTrimThumbnails span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
   height: 100%;
+}
+
+.frameRingTrimThumbnails img {
   object-fit: cover;
   filter: var(--media-color-filter, brightness(1)) brightness(0.63) saturate(0.72);
 }

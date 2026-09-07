@@ -8,6 +8,7 @@ test('tries an available source immediately and only prepares a proxy after fail
   const result = await page.evaluate(async () => {
     const {
       canPlayFrameRingVideoSource,
+      canOpenUnavailableFrameRingSource,
       parseFrameRingDurationSeconds,
       resolveFrameRingMediaDurationForSource,
       resolveFrameRingPlaybackDurationSeconds,
@@ -28,6 +29,9 @@ test('tries an available source immediately and only prepares a proxy after fail
         true,
       ),
       missingSource: canPlayFrameRingVideoSource(null, false),
+      unavailableWithFrames: canOpenUnavailableFrameRingSource(8, 8),
+      unavailableWithPersistedSamples: canOpenUnavailableFrameRingSource(0, 8),
+      unavailableWithoutFrames: canOpenUnavailableFrameRingSource(0, 0),
       directStatus: resolveFrameRingPreviewTask(
         'aurora-media://file/example',
       ),
@@ -103,6 +107,9 @@ test('tries an available source immediately and only prepares a proxy after fail
     directPlayback: true,
     failedPlayback: false,
     missingSource: false,
+    unavailableWithFrames: true,
+    unavailableWithPersistedSamples: true,
+    unavailableWithoutFrames: false,
     directStatus: 'ready',
     preparingFallback: 'preparing',
     missingStatus: 'failed',

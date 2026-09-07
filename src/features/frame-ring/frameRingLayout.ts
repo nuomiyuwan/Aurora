@@ -25,6 +25,20 @@ const FRAME_RING_PREVIEW_BASE = Object.freeze({
   reflectionY: 30,
 })
 
+const FRAME_RING_INFO_BASE = Object.freeze({
+  x: 1450,
+  y: 100,
+  z: -380,
+  width: 270,
+  height: 405,
+  rotateX: 0,
+  rotateY: -20,
+  rotateZ: 0,
+  scale: 1.4,
+  reflectionX: 0,
+  reflectionY: 0,
+})
+
 export const FRAME_RING_BASE_LAYOUT = Object.freeze({
   stage: Object.freeze({
     top: 500,
@@ -52,18 +66,10 @@ export const FRAME_RING_BASE_LAYOUT = Object.freeze({
   // Preserve the ready preview's alpha-bottom-to-floor gap after the empty
   // preview moves and scales, so its real WebGL reflection remains attached.
   emptyPreviewFloorY: 696.307,
-  info: Object.freeze({
-    x: 1450,
-    y: 100,
-    z: -380,
-    width: 270,
-    height: 405,
-    rotateX: 0,
-    rotateY: -20,
-    rotateZ: 0,
-    scale: 1.4,
-    reflectionX: 0,
-    reflectionY: 0,
+  info: FRAME_RING_INFO_BASE,
+  unindexedTrimInfo: Object.freeze({
+    ...FRAME_RING_INFO_BASE,
+    y: 124,
   }),
   action: Object.freeze({
     x: 0,
@@ -128,6 +134,7 @@ export interface ResolvedFrameRingLayout {
   emptyPreview: ResolvedFloatingObject
   emptyPreviewFloorY: number
   info: ResolvedFloatingObject & { height: number }
+  unindexedTrimInfo: ResolvedFloatingObject & { height: number }
   action: ResolvedFloatingObject & { height: number }
   card: { width: number }
   breadcrumb: { top: number; x: number }
@@ -268,6 +275,7 @@ export function resolveFrameRingLayout(viewport: ViewportSize): ResolvedFrameRin
       | typeof FRAME_RING_BASE_LAYOUT.preview
       | typeof FRAME_RING_BASE_LAYOUT.emptyPreview
       | typeof FRAME_RING_BASE_LAYOUT.info
+      | typeof FRAME_RING_BASE_LAYOUT.unindexedTrimInfo
       | typeof FRAME_RING_BASE_LAYOUT.action,
   ): ResolvedFloatingObject => ({
     x: screenX(source.x),
@@ -286,6 +294,13 @@ export function resolveFrameRingLayout(viewport: ViewportSize): ResolvedFrameRin
   const info = {
     ...resolveFloatingObject(FRAME_RING_BASE_LAYOUT.info),
     height: scaleValue(FRAME_RING_BASE_LAYOUT.info.height, rawLayoutScale),
+  }
+  const unindexedTrimInfo = {
+    ...resolveFloatingObject(FRAME_RING_BASE_LAYOUT.unindexedTrimInfo),
+    height: scaleValue(
+      FRAME_RING_BASE_LAYOUT.unindexedTrimInfo.height,
+      rawLayoutScale,
+    ),
   }
   const action = {
     ...resolveFloatingObject(FRAME_RING_BASE_LAYOUT.action),
@@ -316,6 +331,7 @@ export function resolveFrameRingLayout(viewport: ViewportSize): ResolvedFrameRin
     emptyPreview,
     emptyPreviewFloorY: screenY(FRAME_RING_BASE_LAYOUT.emptyPreviewFloorY),
     info,
+    unindexedTrimInfo,
     action,
     card: { width: scaleValue(FRAME_RING_BASE_LAYOUT.card.width, rawLayoutScale) },
     breadcrumb: {
@@ -333,10 +349,16 @@ export function resolveFrameRingLayout(viewport: ViewportSize): ResolvedFrameRin
 
 export function getFrameRingCssVariables(
   layout: ResolvedFrameRingLayout,
-  options: { hasFrameRing?: boolean } = {},
+  options: {
+    hasFrameRing?: boolean
+    alignInfoToUnindexedTrim?: boolean
+  } = {},
 ): FrameRingCssVariables {
   const hasFrameRing = options.hasFrameRing ?? true
   const preview = hasFrameRing ? layout.preview : layout.emptyPreview
+  const info = options.alignInfoToUnindexedTrim
+    ? layout.unindexedTrimInfo
+    : layout.info
   const floatingFloorY = hasFrameRing
     ? layout.floating.floorY
     : layout.emptyPreviewFloorY
@@ -366,17 +388,17 @@ export function getFrameRingCssVariables(
     '--frame-ring-preview-scale': cssNumber(preview.scale),
     '--frame-ring-preview-reflection-x': cssPx(preview.reflectionX),
     '--frame-ring-preview-reflection-y': cssPx(preview.reflectionY),
-    '--frame-ring-info-x': cssPx(layout.info.x),
-    '--frame-ring-info-y': cssPx(layout.info.y),
-    '--frame-ring-info-z': cssPx(layout.info.z),
-    '--frame-ring-info-width': cssPx(layout.info.width),
-    '--frame-ring-info-height': cssPx(layout.info.height),
-    '--frame-ring-info-rotate-x': cssDegrees(layout.info.rotateX),
-    '--frame-ring-info-rotate-y': cssDegrees(layout.info.rotateY),
-    '--frame-ring-info-rotate-z': cssDegrees(layout.info.rotateZ),
-    '--frame-ring-info-scale': cssNumber(layout.info.scale),
-    '--frame-ring-info-reflection-x': cssPx(layout.info.reflectionX),
-    '--frame-ring-info-reflection-y': cssPx(layout.info.reflectionY),
+    '--frame-ring-info-x': cssPx(info.x),
+    '--frame-ring-info-y': cssPx(info.y),
+    '--frame-ring-info-z': cssPx(info.z),
+    '--frame-ring-info-width': cssPx(info.width),
+    '--frame-ring-info-height': cssPx(info.height),
+    '--frame-ring-info-rotate-x': cssDegrees(info.rotateX),
+    '--frame-ring-info-rotate-y': cssDegrees(info.rotateY),
+    '--frame-ring-info-rotate-z': cssDegrees(info.rotateZ),
+    '--frame-ring-info-scale': cssNumber(info.scale),
+    '--frame-ring-info-reflection-x': cssPx(info.reflectionX),
+    '--frame-ring-info-reflection-y': cssPx(info.reflectionY),
     '--frame-ring-action-x': cssPx(layout.action.x),
     '--frame-ring-action-y': cssPx(layout.action.y),
     '--frame-ring-action-z': cssPx(layout.action.z),

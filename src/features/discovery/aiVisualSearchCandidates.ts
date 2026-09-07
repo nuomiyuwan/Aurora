@@ -1,4 +1,7 @@
-import type { MediaAsset } from '../../data/mediaLibraryTypes'
+import type {
+  MediaAsset,
+  ProjectTrimRange,
+} from '../../data/mediaLibraryTypes'
 import type { Project } from '../../data/projects'
 
 type SearchableClip = {
@@ -8,6 +11,7 @@ type SearchableClip = {
   filename: string
   sourceFingerprint: string
   durationSeconds: number | null
+  trimRange?: ProjectTrimRange | null
   tags: string[]
   note: string
   indexedFrames: Array<{
@@ -129,7 +133,9 @@ export function createAiVisualSearchCandidates({
         frameId: POSTER_FRAME_ID,
         sourceFingerprint: clip.sourceFingerprint,
         imagePath: thumbnailPath,
-        timeSeconds: getAiPosterTimeSeconds(clip.durationSeconds),
+        timeSeconds:
+          (clip.trimRange?.inSeconds ?? 0) +
+          getAiPosterTimeSeconds(clip.durationSeconds),
         filename: clip.filename,
         projectTitle: project.title,
         tags: clip.tags,

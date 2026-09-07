@@ -1,5 +1,6 @@
 import type { ResolvedFrameRingLayout } from './frameRingLayout'
 import type { MediaColorPresetId } from '../../data/mediaColorPresets'
+import type { ProjectTrimRange } from '../../data/mediaLibraryTypes'
 
 export interface FrameRingClipSource {
   id: string
@@ -11,6 +12,8 @@ export interface FrameRingClipSource {
   indexedFrames?: readonly FrameRingIndexedFrame[]
   duration: string
   durationSeconds?: number | null
+  sourceDurationSeconds?: number | null
+  trimRange?: ProjectTrimRange | null
   resolution: string
   fps: string
   fpsValue?: number | null
@@ -100,6 +103,11 @@ export const resolveFrameRingPreviewTask = (
   storedStatus?: FrameRingPreviewTask,
 ): FrameRingPreviewTask =>
   storedStatus ?? (sourceUrl ? 'ready' : 'failed')
+
+export const canOpenUnavailableFrameRingSource = (
+  indexedFrameCount: number,
+  sampleCount: number,
+) => indexedFrameCount > 0 || sampleCount > 0
 
 export interface FrameRingVisual {
   x: number
@@ -299,12 +307,13 @@ export function createFrameRingFrames(
 
   const frameTotal = Math.max(1, Math.round(clip.sampleCount))
   const durationSeconds = parseFrameRingDurationSeconds(clip.duration)
+  const playbackStartSeconds = clip.trimRange?.inSeconds ?? 0
   const fps = parseFrameRingFps(clip.fps)
   const thumbnails = relatedThumbnails.length > 0 ? relatedThumbnails : [clip.thumbnail]
 
   return Array.from({ length: frameTotal }, (_, index) => {
     const progress = frameTotal <= 1 ? 0 : index / (frameTotal - 1)
-    const timeSeconds = durationSeconds * progress
+    const timeSeconds = playbackStartSeconds + durationSeconds * progress
     const timecode = formatFrameRingTimecode(timeSeconds, fps)
     const thumbnailGroup = Math.floor(index / 5)
     const thumbnail =
